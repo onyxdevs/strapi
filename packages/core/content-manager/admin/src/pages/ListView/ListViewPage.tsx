@@ -1,0 +1,741 @@
+import * as React from 'react';
+
+import {
+  Page,
+  Pagination,
+  SearchInput,
+  Table,
+  BackButton,
+  useNotification,
+  useStrapiApp,
+  useTracking,
+  useAPIErrorHandler,
+  useQueryParams,
+  useScopedPersistentState,
+  useRBAC,
+  Layouts,
+  useTable,
+  useIsMobile,
+  useClipboard,
+  tours,
+  withEncodedUserParams,
+} from '@strapi/admin/strapi-admin';
+import {
+  Button,
+  Flex,
+  Typography,
+  ButtonProps,
+  Box,
+  EmptyStateLayout,
+  IconButton,
+} from '@strapi/design-system';
+import { Duplicate, Plus } from '@strapi/icons';
+import { EmptyDocuments } from '@strapi/icons/symbols';
+import { stringify } from 'qs';
+import { useIntl } from 'react-intl';
+import { useNavigate, Link as ReactRouterLink, useParams } from 'react-router-dom';
+import { styled } from 'styled-components';
+
+import { InjectionZone } from '../../components/InjectionZone';
+import { HOOKS } from '../../constants/hooks';
+import { PERMISSIONS } from '../../constants/plugin';
+import { DocumentRBAC, useDocumentRBAC } from '../../features/DocumentRBAC';
+import { useDoc } from '../../hooks/useDocument';
+import {
+  ListFieldLayout,
+  convertListLayoutToFieldLayouts,
+  useDocumentLayout,
+} from '../../hooks/useDocumentLayout';
+import {
+  type PersistentQueryConfig,
+  usePersistentPartialQueryParams,
+} from '../../hooks/usePersistentQueryParams';
+import { usePrev } from '../../hooks/usePrev';
+import { useGetAllDocumentsQuery } from '../../services/documents';
+import { buildValidParams } from '../../utils/api';
+import { getTranslation } from '../../utils/translations';
+import { getDisplayName } from '../../utils/users';
+import { DocumentStatus } from '../EditView/components/DocumentStatus';
+
+import { BulkActionsRenderer } from './components/BulkActions/Actions';
+import { listViewFilters as Filters } from './components/Filters';
+import { TableActions } from './components/TableActions';
+import { CellContent, hasContent } from './components/TableCells/CellContent';
+import { ViewSettingsMenu } from './components/ViewSettingsMenu';
+
+import type { Modules } from '@strapi/types';
+
+const { INJECT_COLUMN_IN_TABLE } = HOOKS;
+
+/* -------------------------------------------------------------------------------------------------
+ * ListViewPage
+ * -----------------------------------------------------------------------------------------------*/
+const LayoutsHeaderCustom = styled(Layouts.Header)`
+  overflow-wrap: anywhere;
+`;
+
+type ListViewQuery = {
+  filters?: {
+    $and?: Array<{
+      __status?: {
+        $eq?: unknown;
+      };
+    }>;
+  };
+  plugins?: Record<string, unknown>;
+  page?: string;
+  pageSize?: string;
+  sort?: string;
+  _q?: string;
+};
+
+const ListViewPage = () => {
+  const { trackUsage } = useTracking();
+  const navigate = useNavigate();
+  const { formatMessage } = useIntl();
+  const { toggleNotification } = useNotification();
+  const { copy } = useClipboard();
+  const { _unstableFormatAPIError: formatAPIError } = useAPIErrorHandler(getTranslation);
+  const isMobile = useIsMobile();
+
+  const handleCopyDocumentId = React.useCallback(
+    async (e: React.MouseEvent, documentId: string | undefined) => {
+      e.stopPropagation();
+      if (!documentId) return;
+      const didCopy = await copy(documentId);
+      if (didCopy) {
+        toggleNotification({
+          type: 'success',
+          message: formatMessage({
+            id: 'content-manager.actions.copy-documentId.success',
+            defaultMessage: 'Document ID copied to clipboard',
+          }),
+        });
+      }
+    },
+    [copy, formatMessage, toggleNotification]
+  );
+
+  const { collectionType, model, schema } = useDoc();
+  const { list, listViewConversionContext, isLoading: isLoadingLayout } = useDocumentLayout(model);
+
+  const persistentQueryConfigs: PersistentQueryConfig = React.useMemo(
+    () => ({
+      [`STRAPI_LIST_VIEW_SETTINGS:${model}`]: {
+        paths: ['sort', 'filters', 'pageSize'],
+        scoped: true,
+      },
+      STRAPI_LOCALE: {
+        paths: ['plugins.i18n.locale'],
+        scoped: false,
+      },
+    }),
+    [model]
+  );
+  const { isHydrated } = usePersistentPartialQueryParams(persistentQueryConfigs);
+
+  const [displayedHeaderNames, setDisplayedHeaderNames] = useScopedPersistentState<string[] | null>(
+    `STRAPI_LIST_VIEW_DISPLAYED_HEADERS:${model}`,
+    null
+  );
+
+  const mapDisplayedHeaders = React.useCallback(
+    (headers: ListFieldLayout[]) => headers.map((header) => header.name),
+    []
+  );
+
+  const displayedHeaders: ListFieldLayout[] = React.useMemo(() => {
+    if (
+      !displayedHeaderNames ||
+      !list.metadatas ||
+      Object.keys(list.metadatas).length <= 0 ||
+      !schema?.attributes ||
+      !listViewConversionContext
+    )
+      return [];
+
+    return convertListLayoutToFieldLayouts(
+      displayedHeaderNames,
+      schema.attributes,
+      list.metadatas,
+      {
+        configurations: listViewConversionContext.componentConfigurations,
+        schemas: listViewConversionContext.componentSchemas,
+      },
+      listViewConversionContext.contentTypeSchemas
+    );
+  }, [displayedHeaderNames, schema, list, listViewConversionContext]);
+
+  const handleSetHeaders = React.useCallback(
+    (headers: string[]) => {
+      setDisplayedHeaderNames(headers);
+    },
+    [setDisplayedHeaderNames]
+  );
+
+  const handleResetHeaders = React.useCallback(() => {
+    setDisplayedHeaderNames(mapDisplayedHeaders(list.layout));
+  }, [list.layout, mapDisplayedHeaders, setDisplayedHeaderNames]);
+
+  /**
+   * If the persistent displayedHeaders are not yet initialized, set them to list.layout
+   */
+  React.useEffect(() => {
+    // wait for list.layout to be loaded
+    if (list.layout.length === 0) {
+      return;
+    }
+
+    if (!displayedHeaderNames) {
+      handleResetHeaders();
+    }
+  }, [displayedHeaderNames, handleResetHeaders, list.layout]);
+
+  React.useEffect(() => {
+    if (!schema?.attributes) return;
+    if (!displayedHeaderNames || displayedHeaderNames.length === 0) return;
+    if (schema.uid !== model) return;
+
+    const allowedDisplayHeaders = displayedHeaderNames.filter((header) =>
+      Object.keys(schema?.attributes).includes(header)
+    );
+
+    if (allowedDisplayHeaders.length !== displayedHeaderNames.length) {
+      handleSetHeaders(allowedDisplayHeaders);
+    }
+  }, [displayedHeaderNames, handleSetHeaders, model, schema?.attributes, schema?.uid]);
+
+  const [{ query }, setQuery] = useQueryParams<ListViewQuery>({
+    page: '1',
+    pageSize: list.settings.pageSize.toString(),
+    sort: list.settings.defaultSortBy
+      ? `${list.settings.defaultSortBy}:${list.settings.defaultSortOrder}`
+      : '',
+  });
+
+  const params = React.useMemo(() => buildValidParams(query), [query]);
+  const hasAppliedFilters = (query.filters?.$and?.length ?? 0) > 0;
+  const hasStatusFilter = Boolean(
+    query.filters?.$and?.some(
+      (filter) => filter.__status?.$eq !== undefined && filter.__status.$eq !== null
+    )
+  );
+
+  // If a __status filter becomes active while sort=status:* is in the URL, strip the status sort.
+  React.useEffect(() => {
+    if (
+      hasStatusFilter &&
+      typeof query.sort === 'string' &&
+      /(?:^|,)\s*status:/i.test(query.sort)
+    ) {
+      const cleaned = query.sort
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => !/^status:(ASC|DESC)$/i.test(s))
+        .join(',');
+      setQuery(withEncodedUserParams(query, { sort: cleaned || undefined }), 'push', true);
+    }
+  }, [hasStatusFilter, query, setQuery]);
+
+  const { data, error, isLoading, isFetching } = useGetAllDocumentsQuery(
+    {
+      model,
+      params,
+    },
+    { skip: isLoadingLayout || !isHydrated }
+  );
+
+  /**
+   * If the API returns an error, display a notification
+   */
+  React.useEffect(() => {
+    if (error) {
+      toggleNotification({
+        type: 'danger',
+        message: formatAPIError(error),
+      });
+    }
+  }, [error, formatAPIError, toggleNotification]);
+
+  const { results = [], pagination } = data ?? {};
+
+  React.useEffect(() => {
+    if (pagination && pagination.pageCount > 0 && pagination.page > pagination.pageCount) {
+      navigate(
+        {
+          search: stringify({
+            ...query,
+            page: pagination.pageCount,
+          }),
+        },
+        { replace: true }
+      );
+    }
+  }, [pagination, formatMessage, query, navigate]);
+
+  const { canCreate } = useDocumentRBAC('ListViewPage', ({ canCreate }) => ({
+    canCreate,
+  }));
+
+  const runHookWaterfall = useStrapiApp('ListViewPage', ({ runHookWaterfall }) => runHookWaterfall);
+  /**
+   * Run the waterfall and then inject our additional table headers.
+   */
+  const tableHeaders = React.useMemo(() => {
+    const headers = runHookWaterfall(INJECT_COLUMN_IN_TABLE, {
+      displayedHeaders,
+      layout: list,
+    });
+
+    const formattedHeaders = headers.displayedHeaders.map<ListFieldLayout>((header) => {
+      /**
+       * When the header label is a string, it is an attribute on the current content-type:
+       * Use the attribute name value to compute the translation.
+       * Otherwise, it should be a  translation object coming from a plugin that injects into the table (ie i18n, content-releases, review-workflows):
+       * Use the translation object as is.
+       */
+      const translation =
+        typeof header.label === 'string'
+          ? {
+              id: `content-manager.content-types.${model}.${header.name}`,
+              defaultMessage: header.label,
+            }
+          : header.label;
+
+      return {
+        ...header,
+        label: formatMessage(translation),
+        name: `${header.name}${header.mainField?.name ? `.${header.mainField.name}` : ''}`,
+      };
+    });
+
+    if (schema?.options?.draftAndPublish) {
+      formattedHeaders.push({
+        attribute: {
+          type: 'custom',
+        },
+        name: 'status',
+        label: formatMessage({
+          id: getTranslation(`containers.list.table-headers.status`),
+          defaultMessage: 'status',
+        }),
+        searchable: false,
+        sortable: !hasStatusFilter,
+      } satisfies ListFieldLayout);
+    }
+
+    return formattedHeaders;
+  }, [
+    displayedHeaders,
+    formatMessage,
+    hasStatusFilter,
+    list,
+    runHookWaterfall,
+    schema?.options?.draftAndPublish,
+    model,
+  ]);
+
+  if (isLoadingLayout || !isHydrated || isLoading) {
+    return <Page.Loading />;
+  }
+
+  if (error) {
+    return <Page.Error />;
+  }
+
+  const contentTypeTitle = schema?.info.displayName
+    ? formatMessage({ id: schema.info.displayName, defaultMessage: schema.info.displayName })
+    : formatMessage({
+        id: 'content-manager.containers.untitled',
+        defaultMessage: 'Untitled',
+      });
+
+  const handleRowClick = (id: Modules.Documents.ID) => () => {
+    trackUsage('willEditEntryFromList');
+    navigate({
+      pathname: id.toString(),
+      search: stringify({ plugins: query.plugins }),
+    });
+  };
+
+  /**
+   * The entry link is rendered on the first non-interactive column *that has a
+   * value for the row* (resolved per row, so an empty cell — rendered as "-" —
+   * is skipped and the next candidate carries the link instead). Any scalar
+   * column qualifies — text, numbers, dates (createdAt/updatedAt), `id`, and
+   * `documentId` (its id text becomes the link, the copy button stays separate).
+   * Only genuinely interactive cells are skipped: relations, media, components,
+   * dynamic zones (they embed their own links/menus), plugin-formatted columns
+   * (`cellFormatter`), and the synthetic `status` column.
+   */
+  const NON_LINKABLE_TYPES = ['media', 'relation', 'component', 'dynamiczone'];
+  const linkCandidates = tableHeaders.filter(
+    ({ name, attribute, cellFormatter }) =>
+      name !== 'status' &&
+      typeof cellFormatter !== 'function' &&
+      attribute &&
+      !NON_LINKABLE_TYPES.includes(attribute.type)
+  );
+
+  // The link column for a given row: the first candidate that actually has a
+  // value (uses CellContent's own hasContent so it matches the "-" the cell
+  // would otherwise render). documentId is checked directly (its own cell).
+  const getRowLinkField = (row: (typeof results)[number]) =>
+    linkCandidates.find((header) => {
+      if (header.name === 'documentId') {
+        return Boolean(row.documentId);
+      }
+      const value = row[header.name.split('.')[0]];
+      return hasContent(value, header.mainField, header.attribute);
+    })?.name;
+
+  const isEmptyState = !isFetching && results.length === 0;
+
+  const endActions = (
+    <>
+      {isMobile && list.settings.filterable && schema && <Filters.Trigger />}
+      <InjectionZone area="listView.actions" />
+      <ViewSettingsMenu
+        setHeaders={handleSetHeaders}
+        resetHeaders={handleResetHeaders}
+        headers={displayedHeaderNames ?? []}
+      />
+    </>
+  );
+
+  const searchInput = (
+    <>
+      {list.settings.searchable && (
+        <SearchInput
+          label={formatMessage(
+            { id: 'app.component.search.label', defaultMessage: 'Search for {target}' },
+            { target: contentTypeTitle }
+          )}
+          placeholder={formatMessage({
+            id: 'global.search',
+            defaultMessage: 'Search',
+          })}
+          trackedEvent="didSearch"
+        />
+      )}
+    </>
+  );
+
+  const startActions = (
+    <>
+      {searchInput}
+      {!isMobile && list.settings.filterable && schema && (
+        <>
+          <Filters.Trigger />
+          <Filters.List />
+        </>
+      )}
+    </>
+  );
+
+  const actions =
+    list.settings.filterable && schema ? (
+      <Filters.Root schema={schema} layout={list}>
+        <Layouts.Action
+          endActions={endActions}
+          startActions={startActions}
+          bottomActions={isMobile && hasAppliedFilters ? <Filters.List /> : null}
+        />
+        <Filters.Popover />
+      </Filters.Root>
+    ) : (
+      <Layouts.Action endActions={endActions} startActions={startActions} />
+    );
+
+  return (
+    <>
+      <tours.contentManager.Introduction>
+        {/* Invisible Anchor */}
+        <Box />
+      </tours.contentManager.Introduction>
+      <Page.Main>
+        <Page.Title>{`${contentTypeTitle}`}</Page.Title>
+        <LayoutsHeaderCustom
+          primaryAction={
+            canCreate ? (
+              <tours.contentManager.CreateNewEntry>
+                <CreateButton />
+              </tours.contentManager.CreateNewEntry>
+            ) : null
+          }
+          subtitle={formatMessage(
+            {
+              id: getTranslation('pages.ListView.header-subtitle'),
+              defaultMessage:
+                '{number, plural, =0 {# entries} one {# entry} other {# entries}} found',
+            },
+            { number: pagination?.total }
+          )}
+          title={contentTypeTitle}
+          navigationAction={<BackButton />}
+        />
+        {actions}
+        <Layouts.Content>
+          {isEmptyState ? (
+            <Box background="neutral0" shadow="filterShadow" hasRadius>
+              <EmptyStateLayout
+                action={
+                  canCreate && (
+                    <Box>
+                      <CreateButton variant="secondary" />
+                    </Box>
+                  )
+                }
+                content={formatMessage({
+                  id: 'app.components.EmptyStateLayout.content-document',
+                  defaultMessage: 'No content found',
+                })}
+                hasRadius
+                icon={<EmptyDocuments width="16rem" />}
+              />
+            </Box>
+          ) : (
+            <Flex gap={4} direction="column" alignItems="stretch">
+              <Table.Root rows={results} headers={tableHeaders} isLoading={isFetching}>
+                <TableActionsBar />
+                <Table.Content>
+                  <Table.Head>
+                    <Table.HeaderCheckboxCell />
+                    {tableHeaders.map((header: ListFieldLayout) => (
+                      <Table.HeaderCell key={header.name} {...header} />
+                    ))}
+                  </Table.Head>
+                  <Table.Loading />
+                  <Table.Empty action={canCreate ? <CreateButton variant="secondary" /> : null} />
+                  <Table.Body>
+                    {results.map((row) => {
+                      const rowLinkField = getRowLinkField(row);
+                      return (
+                        <Table.Row
+                          cursor="pointer"
+                          key={row.id}
+                          onClick={handleRowClick(row.documentId)}
+                        >
+                          <Table.CheckboxCell id={row.id} />
+                          {tableHeaders.map(({ cellFormatter, ...header }) => {
+                            if (header.name === 'status') {
+                              const { status } = row;
+
+                              return (
+                                <Table.Cell key={header.name}>
+                                  <DocumentStatus status={status} maxWidth={'min-content'} />
+                                </Table.Cell>
+                              );
+                            }
+                            if (['createdBy', 'updatedBy'].includes(header.name.split('.')[0])) {
+                              // Display the users full name
+                              // Some entries doesn't have a user assigned as creator/updater (ex: entries created through content API)
+                              // In this case, we display a dash
+                              return (
+                                <Table.Cell key={header.name}>
+                                  <Typography textColor="neutral800">
+                                    {row[header.name.split('.')[0]]
+                                      ? getDisplayName(row[header.name.split('.')[0]])
+                                      : '-'}
+                                  </Typography>
+                                </Table.Cell>
+                              );
+                            }
+                            if (header.name === 'documentId') {
+                              // When documentId is the primary link column, only its
+                              // id text becomes the link; the copy button stays outside.
+                              const isDocumentIdLink =
+                                header.name === rowLinkField && Boolean(row.documentId);
+                              return (
+                                <Table.Cell key={header.name}>
+                                  <Flex gap={2} alignItems="center" width="100%" minWidth={0}>
+                                    {isDocumentIdLink ? (
+                                      <Typography
+                                        tag={ReactRouterLink}
+                                        to={{
+                                          pathname: row.documentId,
+                                          search: stringify({ plugins: query.plugins }),
+                                        }}
+                                        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                                        textColor="neutral800"
+                                        maxWidth="30rem"
+                                        ellipsis
+                                      >
+                                        {row.documentId}
+                                      </Typography>
+                                    ) : (
+                                      <Typography textColor="neutral800" maxWidth="30rem" ellipsis>
+                                        {row.documentId || '-'}
+                                      </Typography>
+                                    )}
+                                    {row.documentId && (
+                                      <IconButton
+                                        variant="ghost"
+                                        size="S"
+                                        label={formatMessage({
+                                          id: 'content-manager.actions.copy-documentId.label',
+                                          defaultMessage: 'Copy',
+                                        })}
+                                        onClick={(e) => handleCopyDocumentId(e, row.documentId)}
+                                      >
+                                        <Duplicate />
+                                      </IconButton>
+                                    )}
+                                  </Flex>
+                                </Table.Cell>
+                              );
+                            }
+                            if (typeof cellFormatter === 'function') {
+                              return (
+                                <Table.Cell key={header.name}>
+                                  {/* @ts-expect-error – TODO: fix this TS error */}
+                                  {cellFormatter(row, header, { collectionType, model })}
+                                </Table.Cell>
+                              );
+                            }
+                            return (
+                              <Table.Cell key={header.name}>
+                                <CellContent
+                                  content={row[header.name.split('.')[0]]}
+                                  rowId={row.documentId}
+                                  {...header}
+                                  linkTo={
+                                    header.name === rowLinkField
+                                      ? {
+                                          pathname: row.documentId,
+                                          search: stringify({ plugins: query.plugins }),
+                                        }
+                                      : undefined
+                                  }
+                                />
+                              </Table.Cell>
+                            );
+                          })}
+                          {/* we stop propagation here to allow the menu to trigger it's events without triggering the row redirect */}
+                          <ActionsCell onClick={(e) => e.stopPropagation()}>
+                            <TableActions document={row} />
+                          </ActionsCell>
+                        </Table.Row>
+                      );
+                    })}
+                  </Table.Body>
+                </Table.Content>
+              </Table.Root>
+              <Pagination.Root
+                {...pagination}
+                onPageSizeChange={() => trackUsage('willChangeNumberOfEntriesPerPage')}
+              >
+                <Pagination.PageSize />
+                <Pagination.Links />
+              </Pagination.Root>
+            </Flex>
+          )}
+        </Layouts.Content>
+      </Page.Main>
+    </>
+  );
+};
+
+const ActionsCell = styled(Table.Cell)`
+  display: flex;
+  justify-content: flex-end;
+`;
+
+/* -------------------------------------------------------------------------------------------------
+ * TableActionsBar
+ * -----------------------------------------------------------------------------------------------*/
+
+const TableActionsBar = () => {
+  const selectRow = useTable('TableActionsBar', (state) => state.selectRow);
+  const [{ query }] = useQueryParams<{ plugins: { i18n: { locale: string } } }>();
+  const locale = query?.plugins?.i18n?.locale;
+  const prevLocale = usePrev(locale);
+
+  // TODO: find a better way to reset the selected rows when the locale changes across all the app
+  React.useEffect(() => {
+    if (prevLocale !== locale) {
+      selectRow([]);
+    }
+  }, [selectRow, prevLocale, locale]);
+
+  return (
+    <Table.ActionBar>
+      <BulkActionsRenderer />
+    </Table.ActionBar>
+  );
+};
+
+/* -------------------------------------------------------------------------------------------------
+ * CreateButton
+ * -----------------------------------------------------------------------------------------------*/
+
+interface CreateButtonProps extends Pick<ButtonProps, 'variant'> {}
+
+const CreateButton = ({ variant }: CreateButtonProps) => {
+  const { formatMessage } = useIntl();
+  const { trackUsage } = useTracking();
+  const [{ query }] = useQueryParams<{ plugins: object }>();
+
+  return (
+    <Button
+      variant={variant}
+      tag={ReactRouterLink}
+      onClick={() => {
+        trackUsage('willCreateEntry', { status: 'draft' });
+      }}
+      startIcon={<Plus />}
+      style={{ textDecoration: 'none' }}
+      to={{
+        pathname: 'create',
+        search: stringify({ plugins: query.plugins }),
+      }}
+      minWidth="max-content"
+      fullWidth
+    >
+      {formatMessage({
+        id: getTranslation('HeaderLayout.button.label-add-entry'),
+        defaultMessage: 'Create new entry',
+      })}
+    </Button>
+  );
+};
+
+/* -------------------------------------------------------------------------------------------------
+ * ProtectedListViewPage
+ * -----------------------------------------------------------------------------------------------*/
+
+const ProtectedListViewPage = () => {
+  const { slug = '' } = useParams<{
+    slug: string;
+  }>();
+  const {
+    permissions = [],
+    isLoading,
+    error,
+  } = useRBAC(
+    PERMISSIONS.map((action) => ({
+      action,
+      subject: slug,
+    }))
+  );
+
+  if (isLoading) {
+    return <Page.Loading />;
+  }
+
+  if (error || !slug) {
+    return <Page.Error />;
+  }
+
+  return (
+    <Page.Protect permissions={permissions}>
+      {({ permissions }) => (
+        <DocumentRBAC permissions={permissions}>
+          <ListViewPage key={slug} />
+        </DocumentRBAC>
+      )}
+    </Page.Protect>
+  );
+};
+
+export { ListViewPage, ProtectedListViewPage };

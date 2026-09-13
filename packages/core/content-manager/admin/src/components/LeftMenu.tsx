@@ -1,0 +1,189 @@
+import * as React from 'react';
+
+import { SubNav } from '@strapi/admin/strapi-admin';
+import {
+  Box,
+  Flex,
+  Searchbar,
+  useCollator,
+  useFilter,
+  Divider,
+  Loader,
+} from '@strapi/design-system';
+import { useIntl } from 'react-intl';
+import { useLocation } from 'react-router-dom';
+
+import { useContentManagerInitData } from '../hooks/useContentManagerInitData';
+import { useTypedSelector } from '../modules/hooks';
+import { getTranslation } from '../utils/translations';
+
+const LeftMenu = ({ isFullPage = false }: { isFullPage?: boolean }) => {
+  const [search, setSearch] = React.useState('');
+  const { formatMessage, locale } = useIntl();
+  const { search: locationSearch } = useLocation();
+  const i18nLocale = new URLSearchParams(locationSearch).get('plugins[i18n][locale]');
+
+  // Initialize Content Manager data to ensure links are available
+  const { isLoading } = useContentManagerInitData();
+
+  const collectionTypeLinks = useTypedSelector(
+    (state) => state['content-manager'].app.collectionTypeLinks
+  );
+
+  const singleTypeLinks = useTypedSelector((state) => state['content-manager'].app.singleTypeLinks);
+
+  const { contains } = useFilter(locale, {
+    sensitivity: 'base',
+  });
+
+  const formatter = useCollator(locale, {
+    sensitivity: 'base',
+  });
+
+  const menu = React.useMemo(
+    () =>
+      [
+        {
+          id: 'collectionTypes',
+          title: formatMessage({
+            id: getTranslation('components.LeftMenu.collection-types'),
+            defaultMessage: 'Collection Types',
+          }),
+          searchable: true,
+          links: collectionTypeLinks,
+        },
+        {
+          id: 'singleTypes',
+          title: formatMessage({
+            id: getTranslation('components.LeftMenu.single-types'),
+            defaultMessage: 'Single Types',
+          }),
+          searchable: true,
+          links: singleTypeLinks,
+        },
+      ].map((section) => ({
+        ...section,
+        links: section.links
+          /**
+           * Filter by the search value
+           */
+          .filter((link) => contains(link.title, search.trim()))
+          /**
+           * Sort correctly using the language
+           */
+          .sort((a, b) => formatter.compare(a.title, b.title))
+          /**
+           * Apply the formated strings to the links from react-intl
+           */
+          .map((link) => {
+            return {
+              ...link,
+              title: formatMessage({ id: link.title, defaultMessage: link.title }),
+            };
+          }),
+      })),
+    [collectionTypeLinks, search, singleTypeLinks, contains, formatMessage, formatter]
+  );
+
+  const handleClear = () => {
+    setSearch('');
+  };
+
+  const handleChangeSearch = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setSearch(event.target.value);
+  };
+
+  const label = formatMessage({
+    id: getTranslation('header.name'),
+    defaultMessage: 'Content Manager',
+  });
+
+  // Show loading state while data is being fetched
+  if (isLoading) {
+    return (
+      <SubNav.Main aria-label={label} isFullPage={isFullPage}>
+        <SubNav.Header label={label} />
+        <Divider />
+        <Flex padding={4} justifyContent="center">
+          <Loader />
+        </Flex>
+      </SubNav.Main>
+    );
+  }
+
+  const searchBar = (
+    <Flex
+      paddingLeft={{
+        initial: 3,
+        large: 5,
+      }}
+      paddingRight={{
+        initial: 3,
+        large: 5,
+      }}
+      paddingTop={5}
+      paddingBottom={{ initial: 1, large: 0 }}
+      gap={3}
+      direction="column"
+      alignItems="stretch"
+    >
+      <Searchbar
+        value={search}
+        onChange={handleChangeSearch}
+        onClear={handleClear}
+        placeholder={formatMessage({
+          id: 'search.placeholder',
+          defaultMessage: 'Search',
+        })}
+        size="S"
+        // eslint-disable-next-line react/no-children-prop
+        children={undefined}
+        name={'search_contentType'}
+        clearLabel={formatMessage({ id: 'clearLabel', defaultMessage: 'Clear' })}
+      />
+    </Flex>
+  );
+
+  return (
+    <SubNav.Main aria-label={label} isFullPage={isFullPage}>
+      <SubNav.Header label={label} />
+      <Divider />
+      <Box
+        position={isFullPage ? 'sticky' : 'static'}
+        top={isFullPage ? '0px' : undefined}
+        zIndex={isFullPage ? 2 : undefined}
+        background={isFullPage ? 'neutral100' : 'neutral0'}
+      >
+        {searchBar}
+      </Box>
+      <SubNav.Content>
+        <SubNav.Sections>
+          {menu.map((section) => {
+            return (
+              <SubNav.Section
+                key={section.id}
+                label={section.title}
+                badgeLabel={section.links.length.toString()}
+              >
+                {section.links.map((link) => {
+                  return (
+                    <SubNav.Link
+                      key={link.uid}
+                      to={{
+                        pathname: link.to,
+                        search: i18nLocale ? `?plugins[i18n][locale]=${i18nLocale}` : '',
+                      }}
+                      label={link.title}
+                    />
+                  );
+                })}
+              </SubNav.Section>
+            );
+          })}
+        </SubNav.Sections>
+      </SubNav.Content>
+    </SubNav.Main>
+  );
+};
+
+export { LeftMenu };

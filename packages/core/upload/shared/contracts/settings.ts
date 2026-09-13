@@ -1,0 +1,57 @@
+/**
+ * Used to store user configurations related to media files.
+ * E.g the size optimization flag, the responsive dimensions flag and the auto orientation.
+ */
+
+import { errors } from '@strapi/utils';
+import type { Utils } from '@strapi/types';
+
+export interface Settings {
+  data: {
+    sizeOptimization?: boolean;
+    responsiveDimensions?: boolean;
+    autoOrientation?: boolean;
+    videoPreview?: boolean;
+    aiMetadata?: boolean;
+    /**
+     * Read-only echo of the `plugin::upload.concurrentUploadRequests` app
+     * config — how many upload requests the admin may fire in parallel. Not
+     * part of the stored settings; the server appends it to GET responses and
+     * ignores it on updates.
+     */
+    concurrentUploadRequests?: number;
+  };
+}
+
+export type SettingsData = Settings['data'];
+
+/**
+ * GET /upload/settings
+ *
+ * Return the stored settings for the media files.
+ */
+export declare namespace GetSettings {
+  export interface Request {
+    query?: {};
+  }
+
+  export interface Response {
+    data: Settings;
+  }
+}
+
+/**
+ * PUT /upload/settings
+ *
+ * Update the stored settings
+ */
+export declare namespace UpdateSettings {
+  export interface Request {
+    body: Settings['data'];
+  }
+
+  export type Response = Utils.OneOf<
+    { data: Settings['data'] },
+    { error?: errors.ApplicationError | errors.ValidationError }
+  >;
+}

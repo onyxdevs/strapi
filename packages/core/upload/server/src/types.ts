@@ -1,0 +1,96 @@
+import type { File as FormidableFile } from 'formidable';
+
+export type InputFile = FormidableFile & {
+  path?: string;
+  tmpWorkingDirectory?: string;
+  provider?: string;
+};
+
+export interface FocalPoint {
+  x: number;
+  y: number;
+}
+
+export interface File {
+  id: number;
+  name: string;
+  alternativeText?: string | null;
+  caption?: string | null;
+  focalPoint?: FocalPoint | null;
+  width?: number;
+  height?: number;
+  formats?: Record<string, unknown>;
+  hash: string;
+  ext?: string;
+  mime?: string;
+  size?: number;
+  sizeInBytes?: number;
+  url?: string;
+  previewUrl?: string;
+  path?: string | null;
+  provider?: string;
+  provider_metadata?: Record<string, unknown>;
+  isUrlSigned?: boolean;
+  folder?: number | null;
+  folderPath?: string;
+  related?: {
+    id: string | number;
+    __type: string;
+    __pivot: { field: string };
+  }[];
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: number;
+  updatedBy?: number;
+}
+
+export interface Folder {
+  id: number;
+  name: string;
+  pathId: number;
+  /**
+   * parent id, or null when the folder sits at the media library root
+   */
+  parent?: number | null;
+  /**
+   * children ids
+   */
+  children?: number[];
+  path: string;
+  files?: File[];
+}
+
+export interface Config {
+  provider: string;
+  sizeLimit?: number;
+  providerOptions: Record<string, unknown>;
+  actionOptions: Record<string, unknown>;
+  sharp?: {
+    cache?: boolean;
+    concurrency?: number;
+  };
+  /** Server-side ceiling: files processed in parallel within a single request. */
+  concurrentUploadSize?: number;
+  /** Client-side parallelism: how many upload requests the admin fires at once. */
+  concurrentUploadRequests?: number;
+  security?: {
+    allowedTypes?: string[];
+    deniedTypes?: string[];
+  };
+}
+
+export interface UploadableFile extends Omit<File, 'id'> {
+  filepath?: string;
+  getStream: () => NodeJS.ReadableStream;
+  stream?: NodeJS.ReadableStream;
+  buffer?: Buffer;
+  tmpWorkingDirectory?: string;
+}
+
+export type FileInfo = {
+  name?: string | null;
+  alternativeText?: string | null;
+  caption?: string | null;
+  focalPoint?: FocalPoint | null;
+  folder?: number | null;
+};

@@ -1,5 +1,13 @@
 'use strict';
 
 module.exports = {
-  testMatch: ['**/(*.)+(spec|test).js'],
+  preset: '../../../jest-preset.unit.js',
+  transform: {
+    '^.+\\.ts$': ['@swc/jest'],
+  },
+  testMatch: ['<rootDir>/**/*.test.ts'],
+  displayName: 'Strapi',
+  moduleNameMapper: {
+    '^inquirer$': '<rootDir>/src/test/mocks/inquirer.ts',
+  },
 };

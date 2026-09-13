@@ -1,0 +1,994 @@
+import type { Context } from 'koa';
+
+import { errors } from '@strapi/utils';
+import adminUploadController from '../admin-upload';
+import { getService } from '../../utils';
+import { validateBulkUpdateBody, validateUploadBody } from '../validation/admin/upload';
+import * as findEntityAndCheckPermissionsModule from '../utils/find-entity-and-check-permissions';
+import { ACTIONS } from '../../constants';
+import { prepareUploadRequest } from '../../utils/mime-validation';
+
+jest.mock('../../utils/mime-validation', () => ({
+  prepareUploadRequest: jest.fn(() => ({
+    validFiles: [{ originalFilename: 'test.jpg', mimetype: 'image/jpeg' }],
+    filteredBody: {},
+    errors: [],
+  })),
+}));
+
+jest.mock('../../utils');
+jest.mock('../validation/admin/upload');
+jest.mock('../utils/find-entity-and-check-permissions');
+const mockPrepareUploadRequest = jest.mocked(prepareUploadRequest);
+
+const mockGetService = getService as jest.MockedFunction<typeof getService>;
+const mockValidateUploadBody = validateUploadBody as jest.MockedFunction<typeof validateUploadBody>;
+const mockValidateBulkUpdateBody = validateBulkUpdateBody as jest.MockedFunction<
+  typeof validateBulkUpdateBody
+>;
+const mockFindEntityAndCheckPermissions =
+  findEntityAndCheckPermissionsModule.findEntityAndCheckPermissions as jest.MockedFunction<
+    typeof findEntityAndCheckPermissionsModule.findEntityAndCheckPermissions
+  >;
+
+describe('Admin Upload Controller - AI Service Connection', () => {
+  let mockContext: Partial<Context>;
+  let ctxBulk: Partial<Context>;
+
+  let mockAiMetadataService: any;
+
+  let uploadService: {
+    upload: jest.Mock;
+    updateFileInfo: jest.Mock;
+    replace: jest.Mock;
+  };
+
+  let fileService: {
+    signFileUrls: jest.Mock;
+    upload: jest.Mock;
+    fetchUrlToInputFile: jest.Mock;
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    mockPrepareUploadRequest.mockResolvedValue({
+      validFiles: [{ originalFilename: 'test.jpg', mimetype: 'image/jpeg' }],
+      filteredBody: {},
+      errors: [],
+    });
+
+    mockAiMetadataService = {
+      isEnabled: jest.fn(),
+      processFiles: jest.fn(),
+      updateFilesWithAIMetadata: jest.fn().mockResolvedValue(undefined),
+    };
+
+    uploadService = {
+      upload: jest.fn().mockResolvedValue([{}]),
+      updateFileInfo: jest.fn(),
+      replace: jest.fn(),
+    };
+
+    fileService = {
+      upload: jest.fn().mockResolvedValue([{}]),
+      signFileUrls: jest.fn((file) => Promise.resolve({ ...file, isUrlSigned: true })),
+      fetchUrlToInputFile: jest.fn().mockResolvedValue({
+        file: { originalFilename: 'test.jpg', mimetype: 'image/jpeg', size: 10 },
+      }),
+    };
+
+    mockGetService.mockImplementation((serviceName: string) => {
+      if (serviceName === 'aiMetadata') return mockAiMetadataService;
+      if (serviceName === 'upload') return uploadService;
+      if (serviceName === 'file') return fileService;
+      if (serviceName === 'metrics') {
+        return {
+          trackUsage: jest.fn().mockResolvedValue(undefined),
+        };
+      }
+      return {};
+    });
+
+    const pm = {
+      isAllowed: true,
+      sanitizeOutput: jest.fn((data) => Promise.resolve(data)),
+    };
+
+    global.strapi = {
+      service: jest.fn().mockReturnValue({
+        createPermissionsManager: jest.fn().mockReturnValue(pm),
+      }),
+      admin: {
+        services: {
+          permission: {
+            createPermissionsManager: jest.fn().mockReturnValue(pm),
+          },
+        },
+      },
+      log: { warn: jest.fn() },
+      telemetry: { send: jest.fn() },
+      config: { get: jest.fn().mockReturnValue({ sizeLimit: 1024 * 1024 * 1024 }) },
+    } as any;
+
+    mockValidateUploadBody.mockResolvedValue({
+      fileInfo: {
+        name: 'test.jpg',
+        alternativeText: '',
+        caption: '',
+        focalPoint: null,
+        folder: null,
+      },
+    });
+
+    mockValidateBulkUpdateBody.mockResolvedValue({
+      updates: [],
+    });
+
+    mockFindEntityAndCheckPermissions.mockResolvedValue({
+      pm: {
+        sanitizeOutput: jest.fn((data) => Promise.resolve({ ...data, cleaned: true })),
+      },
+    } as any);
+
+    mockContext = {
+      state: { userAbility: {}, user: { id: 1 } },
+      request: {
+        body: {},
+        files: { files: { filepath: '/tmp/test.jpg', mimetype: 'image/jpeg' } },
+      } as any,
+      forbidden: jest.fn(),
+      query: { id: '7' },
+    } as any;
+
+    ctxBulk = {
+      state: { userAbility: {}, user: { id: 42 } },
+      request: { body: {} },
+    } as any;
+  });
+
+  describe('replaceFile', () => {
+    it('accepts a single replacement file received as an array', async () => {
+      const replacementFile = {
+        filepath: '/tmp/replacement.pdf',
+        originalFilename: 'replacement.pdf',
+        mimetype: 'application/pdf',
+      };
+
+      mockContext.query = { id: '1' } as any;
+      mockContext.request!.body = {
+        fileInfo: ['{"name":"replacement.pdf","folder":null}'],
+      };
+      mockContext.request!.files = { files: [replacementFile] } as any;
+
+      mockPrepareUploadRequest.mockResolvedValue({
+        validFiles: [replacementFile],
+        filteredBody: {
+          fileInfo: {
+            name: 'replacement.pdf',
+            folder: null,
+          },
+        },
+        errors: [],
+      });
+      mockValidateUploadBody.mockResolvedValue({
+        fileInfo: {
+          name: 'replacement.pdf',
+          folder: null,
+          alternativeText: '',
+          caption: '',
+          focalPoint: null,
+        },
+      });
+
+      uploadService.replace.mockResolvedValue({
+        id: 1,
+        name: 'replacement.pdf',
+      });
+
+      await adminUploadController.replaceFile(mockContext as Context);
+
+      expect(mockPrepareUploadRequest).toHaveBeenCalledWith(
+        replacementFile,
+        mockContext.request!.body,
+        strapi
+      );
+      expect(uploadService.replace).toHaveBeenCalledWith(
+        '1',
+        {
+          data: {
+            fileInfo: {
+              name: 'replacement.pdf',
+              folder: null,
+              alternativeText: '',
+              caption: '',
+              focalPoint: null,
+            },
+          },
+          file: replacementFile,
+        },
+        { user: { id: 1 } }
+      );
+      expect(mockContext.body).toEqual({
+        id: 1,
+        name: 'replacement.pdf',
+        cleaned: true,
+        isUrlSigned: true,
+      });
+    });
+
+    // `POST /upload/files/:id/replace` delivers the id in route params; the
+    // legacy `POST /upload` multiplexer delegates here with it in the query.
+    it('reads the id from route params, preferring them over the query', async () => {
+      const replacementFile = {
+        filepath: '/tmp/replacement.pdf',
+        originalFilename: 'replacement.pdf',
+        mimetype: 'application/pdf',
+      };
+
+      mockContext.params = { id: '9' } as any;
+      mockContext.query = { id: '1' } as any;
+      mockContext.request!.files = { files: replacementFile } as any;
+
+      mockPrepareUploadRequest.mockResolvedValue({
+        validFiles: [replacementFile],
+        filteredBody: {},
+        errors: [],
+      });
+
+      uploadService.replace.mockResolvedValue({ id: 9, name: 'replacement.pdf' });
+
+      await adminUploadController.replaceFile(mockContext as Context);
+
+      expect(uploadService.replace).toHaveBeenCalledWith('9', expect.anything(), {
+        user: { id: 1 },
+      });
+    });
+
+    it('throws when neither params nor query carry an id', async () => {
+      mockContext.query = {} as any;
+
+      await expect(adminUploadController.replaceFile(mockContext as Context)).rejects.toThrow(
+        'File id is required'
+      );
+    });
+
+    it('rejects multiple replacement files', async () => {
+      mockContext.query = { id: '1' } as any;
+      mockContext.request!.files = {
+        files: [
+          { filepath: '/tmp/first.jpg', originalFilename: 'first.jpg', mimetype: 'image/jpeg' },
+          { filepath: '/tmp/second.jpg', originalFilename: 'second.jpg', mimetype: 'image/jpeg' },
+        ],
+      } as any;
+
+      await expect(adminUploadController.replaceFile(mockContext as Context)).rejects.toThrow(
+        'Cannot replace a file with multiple ones'
+      );
+
+      expect(mockPrepareUploadRequest).not.toHaveBeenCalled();
+      expect(uploadService.replace).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('uploadFiles - Security Filtering', () => {
+    it('should call enforceUploadSecurity with uploaded files', async () => {
+      const files = [
+        {
+          originalFilename: 'test1.jpg',
+          mimetype: 'image/jpeg',
+          size: 12345,
+          filepath: '/tmp/test1.jpg',
+          newFilename: 'test1.jpg',
+          hashAlgorithm: 'sha256' as const,
+          length: 12345,
+          mtime: new Date(),
+          toJSON() {
+            return {
+              originalFilename: this.originalFilename,
+              mimetype: this.mimetype,
+              size: this.size,
+              filepath: this.filepath,
+              newFilename: this.newFilename,
+              hashAlgorithm: this.hashAlgorithm,
+              length: this.length,
+              mtime: this.mtime,
+            };
+          },
+        },
+        {
+          originalFilename: 'test2.pdf',
+          mimetype: 'application/pdf',
+          size: 23456,
+          filepath: '/tmp/test2.pdf',
+          newFilename: 'test2.pdf',
+          hashAlgorithm: 'sha256' as const,
+          length: 23456,
+          mtime: new Date(),
+          toJSON() {
+            return {
+              originalFilename: this.originalFilename,
+              mimetype: this.mimetype,
+              size: this.size,
+              filepath: this.filepath,
+              newFilename: this.newFilename,
+              hashAlgorithm: this.hashAlgorithm,
+              length: this.length,
+              mtime: this.mtime,
+            };
+          },
+        },
+      ];
+
+      mockContext.request!.files = { files };
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockPrepareUploadRequest).toHaveBeenCalledWith(files, {}, strapi);
+    });
+
+    it('should throw ValidationError when no valid files remain after security check', async () => {
+      mockPrepareUploadRequest.mockRejectedValue(
+        new errors.ValidationError('MIME type not allowed', {})
+      );
+
+      await expect(adminUploadController.uploadFiles(mockContext as Context)).rejects.toThrow(
+        errors.ValidationError
+      );
+    });
+
+    it('should filter fileInfo array when some files are rejected by security', async () => {
+      mockPrepareUploadRequest.mockResolvedValue({
+        validFiles: [{ originalFilename: 'allowed.jpg', mimetype: 'image/jpeg' }],
+        filteredBody: {
+          fileInfo: '{"name":"allowed.jpg","folder":null}',
+        },
+        errors: [],
+      });
+
+      mockContext.request!.body = {
+        fileInfo: ['{"name":"blocked.pdf","folder":null}', '{"name":"allowed.jpg","folder":null}'],
+      };
+
+      mockValidateUploadBody.mockResolvedValue({
+        fileInfo: {
+          name: 'allowed.jpg',
+          folder: null,
+          alternativeText: '',
+          caption: '',
+          focalPoint: null,
+        },
+      });
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockValidateUploadBody).toHaveBeenCalledWith(
+        {
+          fileInfo: '{"name":"allowed.jpg","folder":null}',
+        },
+        false
+      );
+    });
+
+    it('should handle single file being filtered correctly', async () => {
+      mockPrepareUploadRequest.mockResolvedValue({
+        validFiles: [{ originalFilename: 'test.jpg', mimetype: 'image/jpeg' }],
+        filteredBody: {
+          fileInfo: '{"name":"test.jpg","folder":null}',
+        },
+        errors: [],
+      });
+
+      mockContext.request!.body = {
+        fileInfo: ['{"name":"test.jpg","folder":null}'],
+      };
+
+      mockValidateUploadBody.mockResolvedValue({
+        fileInfo: {
+          name: 'test.jpg',
+          folder: null,
+          alternativeText: '',
+          caption: '',
+          focalPoint: null,
+        },
+      });
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockValidateUploadBody).toHaveBeenCalledWith(
+        {
+          fileInfo: '{"name":"test.jpg","folder":null}',
+        },
+        false
+      );
+    });
+
+    it('should handle multiple files remaining after filtering', async () => {
+      mockPrepareUploadRequest.mockResolvedValue({
+        validFiles: [
+          { originalFilename: 'file1.jpg', mimetype: 'image/jpeg' },
+          { originalFilename: 'file2.png', mimetype: 'image/png' },
+        ],
+        filteredBody: {
+          fileInfo: [
+            { name: 'file1.jpg', folder: null, caption: '', alternativeText: '' },
+            { name: 'file2.png', folder: null, caption: '', alternativeText: '' },
+          ],
+        },
+        errors: [],
+      });
+
+      mockContext.request!.body = {
+        fileInfo: [
+          { name: 'file1.jpg', alternativeText: '', caption: '', focalPoint: null, folder: null },
+          { name: 'file2.png', alternativeText: '', caption: '', focalPoint: null, folder: null },
+        ],
+      };
+
+      mockValidateUploadBody.mockResolvedValue({
+        fileInfo: [
+          { name: 'file1.jpg', alternativeText: '', caption: '', focalPoint: null, folder: null },
+          { name: 'file2.png', alternativeText: '', caption: '', focalPoint: null, folder: null },
+        ],
+      });
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockValidateUploadBody).toHaveBeenCalledWith(
+        {
+          fileInfo: [
+            { name: 'file1.jpg', folder: null, caption: '', alternativeText: '' },
+            { name: 'file2.png', folder: null, caption: '', alternativeText: '' },
+          ],
+        },
+        true
+      );
+    });
+
+    it('should align filesArray with filtered fileInfo data', async () => {
+      const validFiles = [
+        { originalFilename: 'file1.jpg', mimetype: 'image/jpeg' },
+        { originalFilename: 'file2.png', mimetype: 'image/png' },
+      ];
+
+      mockPrepareUploadRequest.mockResolvedValue({
+        validFiles,
+        filteredBody: {},
+        errors: [],
+      });
+
+      mockValidateUploadBody.mockResolvedValue({
+        fileInfo: [
+          { name: 'file2.png', alternativeText: '', caption: '', focalPoint: null, folder: null },
+          { name: 'file1.jpg', alternativeText: '', caption: '', focalPoint: null, folder: null },
+        ],
+      });
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(uploadService.upload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          files: expect.arrayContaining([
+            expect.objectContaining({ originalFilename: 'file2.png' }),
+            expect.objectContaining({ originalFilename: 'file1.jpg' }),
+          ]),
+          data: expect.objectContaining({
+            fileInfo: expect.arrayContaining([
+              expect.objectContaining({ name: 'file2.png' }),
+              expect.objectContaining({ name: 'file1.jpg' }),
+            ]),
+          }),
+        }),
+        expect.any(Object)
+      );
+    });
+
+    it('should handle non-array fileInfo body correctly', async () => {
+      mockPrepareUploadRequest.mockResolvedValue({
+        validFiles: [{ originalFilename: 'single.jpg', mimetype: 'image/jpeg' }],
+        filteredBody: {
+          fileInfo: '{"name":"single.jpg","folder":null}',
+        },
+        errors: [],
+      });
+
+      mockContext.request!.body = {
+        fileInfo: '{"name":"single.jpg","folder":null}',
+      };
+
+      mockValidateUploadBody.mockResolvedValue({
+        fileInfo: {
+          name: 'single.jpg',
+          folder: null,
+          alternativeText: '',
+          caption: '',
+          focalPoint: null,
+        },
+      });
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockValidateUploadBody).toHaveBeenCalledWith(
+        {
+          fileInfo: '{"name":"single.jpg","folder":null}',
+        },
+        false
+      );
+    });
+
+    it('should throw ValidationError when no valid files after filtering', async () => {
+      mockPrepareUploadRequest.mockRejectedValue(
+        new errors.ValidationError('File size exceeds limit', {
+          fileSize: 10000000,
+          maxFileSize: 1000000,
+        })
+      );
+
+      await expect(adminUploadController.uploadFiles(mockContext as Context)).rejects.toThrow(
+        'File size exceeds limit'
+      );
+    });
+  });
+
+  describe('uploadFiles - AI Service Connection', () => {
+    it('should call AI processFiles when service is enabled', async () => {
+      mockAiMetadataService.isEnabled.mockReturnValue(true);
+      mockAiMetadataService.processFiles.mockResolvedValue([{}]);
+
+      uploadService.upload.mockResolvedValue([
+        {
+          id: 1,
+          name: 'test.jpg',
+          mime: 'image/jpeg',
+          url: '/uploads/test.jpg',
+          provider: 'local',
+        },
+      ]);
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockAiMetadataService.processFiles).toHaveBeenCalledWith([
+        expect.objectContaining({
+          id: 1,
+          name: 'test.jpg',
+          url: '/uploads/test.jpg',
+          mime: 'image/jpeg',
+          provider: 'local',
+        }),
+      ]);
+    });
+
+    it('should not call AI processFiles when service is disabled', async () => {
+      mockAiMetadataService.isEnabled.mockReturnValue(false);
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockAiMetadataService.processFiles).not.toHaveBeenCalled();
+    });
+
+    it('should handle AI service errors gracefully', async () => {
+      mockAiMetadataService.isEnabled.mockReturnValue(true);
+      mockAiMetadataService.processFiles.mockRejectedValue(new Error('AI service unavailable'));
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(strapi.log.warn).toHaveBeenCalledWith(
+        'AI metadata generation failed, proceeding without AI enhancements',
+        { error: 'AI service unavailable' }
+      );
+    });
+
+    it('should update files with AI metadata when available', async () => {
+      mockAiMetadataService.isEnabled.mockReturnValue(true);
+      mockAiMetadataService.processFiles.mockResolvedValue([
+        { altText: 'AI generated alt text', caption: 'AI generated caption' },
+      ]);
+
+      const uploadedFiles = [
+        {
+          id: 1,
+          name: 'test.jpg',
+          mime: 'image/jpeg',
+          url: '/uploads/test.jpg',
+          provider: 'local',
+        },
+      ];
+
+      uploadService.upload.mockResolvedValue(uploadedFiles);
+
+      await adminUploadController.uploadFiles(mockContext as Context);
+
+      expect(mockAiMetadataService.updateFilesWithAIMetadata).toHaveBeenCalledWith(
+        uploadedFiles,
+        [{ altText: 'AI generated alt text', caption: 'AI generated caption' }],
+        { id: 1 }
+      );
+    });
+  });
+
+  describe('bulkUpdateFileInfo', () => {
+    it('updates multiple files, sanitizes outputs, and returns an array', async () => {
+      mockValidateBulkUpdateBody.mockResolvedValue({
+        updates: [
+          {
+            id: 1,
+            fileInfo: {
+              name: 'fileA.jpg',
+              caption: 'A',
+              alternativeText: 'alternativeA',
+              focalPoint: null,
+              folder: null,
+            },
+          },
+          {
+            id: 2,
+            fileInfo: {
+              name: 'fileB.jpg',
+              alternativeText: 'alternativeB',
+              caption: 'B',
+              focalPoint: null,
+              folder: null,
+            },
+          },
+        ],
+      });
+
+      uploadService.updateFileInfo
+        .mockResolvedValueOnce({ id: 1, caption: 'A' })
+        .mockResolvedValueOnce({ id: 2, alternativeText: 'B' });
+
+      await adminUploadController.bulkUpdateFileInfo(ctxBulk as Context);
+
+      expect(mockValidateBulkUpdateBody).toHaveBeenCalledWith({});
+      expect(uploadService.updateFileInfo).toHaveBeenNthCalledWith(
+        1,
+        1,
+        {
+          name: 'fileA.jpg',
+          alternativeText: 'alternativeA',
+          caption: 'A',
+          focalPoint: null,
+          folder: null,
+        },
+        { user: { id: 42 } }
+      );
+      expect(uploadService.updateFileInfo).toHaveBeenNthCalledWith(
+        2,
+        2,
+        {
+          name: 'fileB.jpg',
+          alternativeText: 'alternativeB',
+          caption: 'B',
+          focalPoint: null,
+          folder: null,
+        },
+        { user: { id: 42 } }
+      );
+
+      expect(mockFindEntityAndCheckPermissions).toHaveBeenCalledTimes(2);
+
+      expect(ctxBulk.body).toEqual([
+        { id: 1, caption: 'A', cleaned: true, isUrlSigned: true },
+        { id: 2, alternativeText: 'B', cleaned: true, isUrlSigned: true },
+      ]);
+    });
+
+    it('returns an empty array when no updates provided', async () => {
+      mockValidateBulkUpdateBody.mockResolvedValue({ updates: [] });
+
+      await adminUploadController.bulkUpdateFileInfo(ctxBulk as Context);
+
+      expect(ctxBulk.body).toEqual([]);
+      expect(uploadService.updateFileInfo).not.toHaveBeenCalled();
+      expect(mockFindEntityAndCheckPermissions).not.toHaveBeenCalled();
+    });
+
+    it('propagates validation errors from validateBulkUpdateBody', async () => {
+      mockValidateBulkUpdateBody.mockRejectedValue(new Error('Invalid payload'));
+
+      await expect(adminUploadController.bulkUpdateFileInfo(ctxBulk as Context)).rejects.toThrow(
+        'Invalid payload'
+      );
+    });
+
+    it('sanitizes each updated entity with ACTIONS.read', async () => {
+      const sanitizeOutput = jest.fn((data) => Promise.resolve({ ok: true, ...data }));
+      mockFindEntityAndCheckPermissions.mockResolvedValue({ pm: { sanitizeOutput } } as any);
+
+      mockValidateBulkUpdateBody.mockResolvedValue({
+        updates: [
+          {
+            id: 10,
+            fileInfo: {
+              name: 'fileA.jpg',
+              caption: 'X',
+              alternativeText: 'alternativeA',
+              focalPoint: null,
+              folder: null,
+            },
+          },
+        ],
+      });
+
+      uploadService.updateFileInfo.mockResolvedValue({ id: 10, caption: 'X' });
+
+      await adminUploadController.bulkUpdateFileInfo(ctxBulk as Context);
+
+      expect(sanitizeOutput).toHaveBeenCalledWith(
+        { id: 10, caption: 'X', isUrlSigned: true },
+        { action: ACTIONS.read }
+      );
+      expect(ctxBulk.body).toEqual([expect.objectContaining({ ok: true, id: 10, caption: 'X' })]);
+    });
+
+    it('passes the authenticated user to updateFileInfo', async () => {
+      mockValidateBulkUpdateBody.mockResolvedValue({
+        updates: [
+          {
+            id: 7,
+            fileInfo: {
+              name: 'fileA.jpg',
+              alternativeText: 'hello',
+              caption: 'A',
+              focalPoint: null,
+              folder: null,
+            },
+          },
+        ],
+      });
+
+      uploadService.updateFileInfo.mockResolvedValue({ id: 7 });
+
+      await adminUploadController.bulkUpdateFileInfo(ctxBulk as Context);
+
+      expect(uploadService.updateFileInfo).toHaveBeenCalledWith(
+        7,
+        {
+          name: 'fileA.jpg',
+          alternativeText: 'hello',
+          caption: 'A',
+          focalPoint: null,
+          folder: null,
+        },
+        { user: { id: 42 } }
+      );
+    });
+  });
+
+  describe('updateFileInfo', () => {
+    it('updates a file, sanitizes outputs, and returns the signed file', async () => {
+      mockValidateUploadBody.mockResolvedValue({
+        id: 7,
+        fileInfo: {
+          name: 'fileA.jpg',
+          alternativeText: 'hello',
+          caption: 'A',
+        },
+      } as any);
+
+      uploadService.updateFileInfo.mockResolvedValue({ id: 7 });
+
+      await adminUploadController.updateFileInfo(mockContext as Context);
+
+      expect(fileService.signFileUrls).toHaveBeenCalledWith({ id: 7 });
+      expect(mockContext.body).toEqual(expect.objectContaining({ id: 7, isUrlSigned: true }));
+    });
+
+    // `PUT /upload/files/:id` delivers the id in route params; the legacy
+    // `POST /upload` multiplexer delegates here with it in the query string.
+    it('reads the id from route params', async () => {
+      mockContext.params = { id: '9' } as any;
+      mockContext.query = {} as any;
+
+      uploadService.updateFileInfo.mockResolvedValue({ id: 9 });
+
+      await adminUploadController.updateFileInfo(mockContext as Context);
+
+      expect(uploadService.updateFileInfo).toHaveBeenCalledWith('9', expect.anything(), {
+        user: { id: 1 },
+      });
+    });
+
+    it('prefers route params over the query id when both are present', async () => {
+      mockContext.params = { id: '9' } as any;
+      mockContext.query = { id: '7' } as any;
+
+      uploadService.updateFileInfo.mockResolvedValue({ id: 9 });
+
+      await adminUploadController.updateFileInfo(mockContext as Context);
+
+      expect(uploadService.updateFileInfo).toHaveBeenCalledWith('9', expect.anything(), {
+        user: { id: 1 },
+      });
+    });
+
+    it('throws when neither params nor query carry an id', async () => {
+      mockContext.query = {} as any;
+
+      await expect(adminUploadController.updateFileInfo(mockContext as Context)).rejects.toThrow(
+        'File id is required'
+      );
+    });
+  });
+  /**
+   * `fetchUrlToInputFile` reports byte progress raw — once per streamed chunk, thousands of
+   * times for a large file. The controller is the throttle, and these cover the contract the
+   * admin's progress bar depends on.
+   */
+  describe('uploadFromUrls', () => {
+    type SSEFrame = { event: string; data: Record<string, any> };
+
+    let frames: SSEFrame[];
+    let ctxUrls: Partial<Context>;
+    let now: number;
+
+    /** A single SSE write is `event: <name>\ndata: <json>\n\n`. */
+    const parseFrame = (chunk: string): SSEFrame => {
+      const [eventLine, dataLine] = chunk.trim().split('\n');
+
+      return {
+        event: eventLine.replace('event: ', ''),
+        data: JSON.parse(dataLine.replace('data: ', '')),
+      };
+    };
+
+    const eventsOf = (name: string) => frames.filter((frame) => frame.event === name);
+    const indexOfEvent = (name: string) => frames.findIndex((frame) => frame.event === name);
+
+    beforeEach(() => {
+      frames = [];
+      now = 1_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+
+      ctxUrls = {
+        state: { userAbility: {}, user: { id: 1 } },
+        request: { body: { urls: ['https://example.com/big.zip'], folderId: null } },
+        res: {
+          writeHead: jest.fn(),
+          write: jest.fn((chunk: string) => {
+            frames.push(parseFrame(chunk));
+            return true;
+          }),
+          end: jest.fn(),
+        },
+        forbidden: jest.fn(),
+      } as any;
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    /**
+     * Drives the fetch with a scripted set of progress reports. `advanceMs` moves the clock
+     * between reports, which is what the controller's throttle keys off.
+     */
+    const mockFetchReporting = (
+      reports: Array<{ bytesWritten: number; totalBytes: number | null }>,
+      advanceMs = 0
+    ) => {
+      fileService.fetchUrlToInputFile.mockImplementation(
+        async (_url: string, _dir: string, _limit: number, onProgress?: (p: any) => void) => {
+          reports.forEach((report) => {
+            now += advanceMs;
+            onProgress?.(report);
+          });
+
+          return { file: { originalFilename: 'big.zip', mimetype: 'image/jpeg', size: 300 } };
+        }
+      );
+    };
+
+    it('streams progress frames between the fetch starting and the file completing', async () => {
+      mockFetchReporting(
+        [
+          { bytesWritten: 0, totalBytes: 300 },
+          { bytesWritten: 100, totalBytes: 300 },
+          { bytesWritten: 200, totalBytes: 300 },
+          { bytesWritten: 300, totalBytes: 300 },
+        ],
+        250
+      );
+
+      await adminUploadController.uploadFromUrls(ctxUrls as Context);
+
+      expect(eventsOf('file:progress').map((frame) => frame.data)).toEqual([
+        { index: 0, loadedBytes: 0, totalBytes: 300, phase: 'fetch' },
+        { index: 0, loadedBytes: 100, totalBytes: 300, phase: 'fetch' },
+        { index: 0, loadedBytes: 200, totalBytes: 300, phase: 'fetch' },
+        { index: 0, loadedBytes: 300, totalBytes: 300, phase: 'fetch' },
+      ]);
+
+      // The fetch phase sits between the fetch announcement and the upload of the temp file.
+      expect(indexOfEvent('file:fetching')).toBeLessThan(indexOfEvent('file:progress'));
+      expect(frames.findIndex((frame) => frame.event === 'file:uploading')).toBeGreaterThan(
+        frames.map((frame) => frame.event).lastIndexOf('file:progress')
+      );
+      expect(indexOfEvent('file:complete')).toBeGreaterThan(indexOfEvent('file:uploading'));
+    });
+
+    // The untouched events keep their payloads: only a new event was added.
+    it('leaves the surrounding events unchanged', async () => {
+      mockFetchReporting([{ bytesWritten: 0, totalBytes: 300 }]);
+
+      await adminUploadController.uploadFromUrls(ctxUrls as Context);
+
+      expect(eventsOf('file:fetching')[0].data).toEqual({
+        url: 'https://example.com/big.zip',
+        index: 0,
+        total: 1,
+      });
+      expect(eventsOf('file:uploading')[0].data).toEqual({
+        name: 'big.zip',
+        index: 0,
+        total: 1,
+        size: 300,
+      });
+    });
+
+    it('coalesces a flood of chunk reports into a handful of frames', async () => {
+      const chunks = Array.from({ length: 512 }, (_, i) => ({
+        bytesWritten: (i + 1) * 1024,
+        totalBytes: 512 * 1024,
+      }));
+
+      // Clock frozen: every chunk lands inside the same throttle window.
+      mockFetchReporting([{ bytesWritten: 0, totalBytes: 512 * 1024 }, ...chunks]);
+
+      await adminUploadController.uploadFromUrls(ctxUrls as Context);
+
+      // Only the size announcement and the final frame get through.
+      expect(eventsOf('file:progress').map((frame) => frame.data.loadedBytes)).toEqual([
+        0,
+        512 * 1024,
+      ]);
+    });
+
+    // Otherwise the row holds the last emitted fraction through the whole provider upload.
+    it('flushes the frame that reaches the total even inside the throttle window', async () => {
+      mockFetchReporting([
+        { bytesWritten: 0, totalBytes: 300 },
+        { bytesWritten: 200, totalBytes: 300 },
+        { bytesWritten: 300, totalBytes: 300 },
+      ]);
+
+      await adminUploadController.uploadFromUrls(ctxUrls as Context);
+
+      expect(eventsOf('file:progress').map((frame) => frame.data.loadedBytes)).toEqual([0, 300]);
+    });
+
+    // Without it the client never learns the denominator and the row stays indeterminate.
+    it('always emits the size announcement, however tight the throttle', async () => {
+      mockFetchReporting([
+        { bytesWritten: 0, totalBytes: 300 },
+        { bytesWritten: 300, totalBytes: 300 },
+      ]);
+
+      await adminUploadController.uploadFromUrls(ctxUrls as Context);
+
+      expect(eventsOf('file:progress')).toHaveLength(2);
+      expect(eventsOf('file:progress')[0].data).toEqual({
+        index: 0,
+        loadedBytes: 0,
+        totalBytes: 300,
+        phase: 'fetch',
+      });
+    });
+
+    // A chunked remote sends no Content-Length. The absence is forwarded as-is so the client
+    // can stay indeterminate rather than invent a denominator.
+    it('forwards an unknown total as null', async () => {
+      mockFetchReporting(
+        [
+          { bytesWritten: 0, totalBytes: null },
+          { bytesWritten: 100, totalBytes: null },
+        ],
+        250
+      );
+
+      await adminUploadController.uploadFromUrls(ctxUrls as Context);
+
+      expect(eventsOf('file:progress').map((frame) => frame.data.totalBytes)).toEqual([null, null]);
+    });
+  });
+});

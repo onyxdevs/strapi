@@ -1,0 +1,1013 @@
+import * as visitors from '../sanitize/visitors';
+import * as contentTypeUtils from '../content-types';
+import { sanitizers } from '../sanitize';
+import { traverseQueryFilters } from '../traverse';
+import type { Visitor } from '../traverse/factory';
+import traverseEntity from '../traverse-entity';
+import { adminUserModel, articleModel, getModel } from './test-fixtures';
+
+const { CREATED_BY_ATTRIBUTE, UPDATED_BY_ATTRIBUTE } = contentTypeUtils.constants;
+
+describe('Sanitize visitors util', () => {
+  describe('removePrivate - removes private fields in relational filters', () => {
+    const ctx = { schema: articleModel, getModel };
+
+    test('removes private resetPasswordToken field from filters', async () => {
+      const filters = {
+        updatedBy: {
+          resetPasswordToken: { $startsWith: 'abc' },
+        },
+      };
+
+      const result = await traverseQueryFilters(visitors.removePrivate, ctx)(filters);
+
+      expect(result).toEqual({ updatedBy: {} });
+    });
+
+    test('removes private email field from filters', async () => {
+      const filters = {
+        updatedBy: {
+          email: { $contains: 'admin@' },
+        },
+      };
+
+      const result = await traverseQueryFilters(visitors.removePrivate, ctx)(filters);
+
+      expect(result).toEqual({ updatedBy: {} });
+    });
+
+    test('removes private isActive field from filters', async () => {
+      const filters = {
+        createdBy: {
+          isActive: true,
+        },
+      };
+
+      const result = await traverseQueryFilters(visitors.removePrivate, ctx)(filters);
+
+      expect(result).toEqual({ createdBy: {} });
+    });
+
+    test('keeps public fields in filters', async () => {
+      const filters = {
+        updatedBy: {
+          firstname: 'John',
+        },
+      };
+
+      const result = await traverseQueryFilters(visitors.removePrivate, ctx)(filters);
+
+      expect(result).toEqual({ updatedBy: { firstname: 'John' } });
+    });
+
+    test('removes only private fields, keeps public fields', async () => {
+      const filters = {
+        updatedBy: {
+          firstname: 'John',
+          email: { $contains: 'admin@' },
+          resetPasswordToken: { $startsWith: 'abc' },
+        },
+      };
+
+      const result = await traverseQueryFilters(visitors.removePrivate, ctx)(filters);
+
+      expect(result).toEqual({ updatedBy: { firstname: 'John' } });
+    });
+  });
+
+  describe('removePassword - removes password fields in relational filters', () => {
+    const ctx = { schema: articleModel, getModel };
+
+    test('removes password field from filters', async () => {
+      const filters = {
+        createdBy: {
+          password: { $startsWith: '$2b$' },
+        },
+      };
+
+      const result = await traverseQueryFilters(visitors.removePassword, ctx)(filters);
+
+      expect(result).toEqual({ createdBy: {} });
+    });
+  });
+
+  describe('defaultSanitizeFilters - integration test', () => {
+    const ctx = { schema: articleModel, getModel };
+
+    test('removes private fields from filters', async () => {
+      const filters = {
+        updatedBy: {
+          resetPasswordToken: { $startsWith: 'abc' },
+          firstname: 'John',
+        },
+      };
+
+      const result = await sanitizers.defaultSanitizeFilters(ctx, filters);
+
+      expect(result).toEqual({ updatedBy: { firstname: 'John' } });
+    });
+
+    test('removes password fields from filters', async () => {
+      const filters = {
+        createdBy: {
+          password: { $startsWith: '$2b$' },
+          lastname: 'Doe',
+        },
+      };
+
+      const result = await sanitizers.defaultSanitizeFilters(ctx, filters);
+
+      expect(result).toEqual({ createdBy: { lastname: 'Doe' } });
+    });
+
+    test('removes all sensitive fields, keeps only public fields', async () => {
+      const filters = {
+        updatedBy: {
+          email: { $contains: 'admin@' },
+          password: { $startsWith: '$2b$' },
+          resetPasswordToken: { $startsWith: 'abc' },
+          isActive: true,
+          blocked: false,
+          firstname: 'John',
+          lastname: 'Doe',
+        },
+      };
+
+      const result = await sanitizers.defaultSanitizeFilters(ctx, filters);
+
+      expect(result).toEqual({
+        updatedBy: {
+          firstname: 'John',
+          lastname: 'Doe',
+        },
+      });
+    });
+
+    test('keeps scalar field $contains filter', async () => {
+      const filters = { title: { $contains: 'est02' } };
+      await expect(sanitizers.defaultSanitizeFilters(ctx, filters)).resolves.toEqual(filters);
+    });
+
+    test('keeps scalar field $containsi filter', async () => {
+      const filters = { title: { $containsi: 'EST02' } };
+      await expect(sanitizers.defaultSanitizeFilters(ctx, filters)).resolves.toEqual(filters);
+    });
+
+    test('keeps scalar datetime $gt filter with Date operand (GraphQL)', async () => {
+      const schemaWithDatetime: typeof articleModel = {
+        ...articleModel,
+        attributes: {
+          ...articleModel.attributes,
+          publishedAt: { type: 'datetime' },
+        },
+      };
+      const ctxDatetime = { schema: schemaWithDatetime, getModel };
+      const date = new Date('2022-03-17T15:06:57.878Z');
+      const filters = { publishedAt: { $gt: date } };
+
+      await expect(sanitizers.defaultSanitizeFilters(ctxDatetime, filters)).resolves.toEqual(
+        filters
+      );
+    });
+
+    test('removes unrecognized keys nested under scalar field filters', async () => {
+      await expect(
+        sanitizers.defaultSanitizeFilters(ctx, { title: { totallyUnknownNestedKey: 'x' } })
+      ).resolves.toEqual({});
+    });
+
+    test('traverseQueryFilters visits nested operators under scalar fields', async () => {
+      const visited: string[] = [];
+      const visitor: Visitor = ({ key }) => {
+        visited.push(key);
+      };
+
+      await traverseQueryFilters(visitor, ctx)({ title: { $contains: 'est02' } });
+
+      expect(visited).toContain('title');
+      expect(visited).toContain('$contains');
+    });
+
+    test('handles nested $and/$or operators with sensitive fields', async () => {
+      const filters = {
+        $or: [
+          { updatedBy: { resetPasswordToken: { $startsWith: 'abc' } } },
+          { updatedBy: { firstname: 'John' } },
+        ],
+      };
+
+      const result = await sanitizers.defaultSanitizeFilters(ctx, filters);
+
+      expect(result).toEqual({
+        $or: [{ updatedBy: { firstname: 'John' } }],
+      });
+    });
+  });
+
+  describe('defaultSanitizePopulate - nested filters/sort/fields within populate', () => {
+    const categoryModel: any = {
+      uid: 'api::category.category',
+      modelType: 'contentType',
+      kind: 'collectionType',
+      info: { singularName: 'category', pluralName: 'categories', displayName: 'Category' },
+      options: {},
+      attributes: {
+        id: { type: 'integer' },
+        name: { type: 'string' },
+        createdBy: { type: 'relation', relation: 'oneToOne', target: 'admin::user' },
+        updatedBy: { type: 'relation', relation: 'oneToOne', target: 'admin::user' },
+      },
+    };
+
+    const productModel: any = {
+      uid: 'api::product.product',
+      modelType: 'contentType',
+      kind: 'collectionType',
+      info: { singularName: 'product', pluralName: 'products', displayName: 'Product' },
+      options: {},
+      attributes: {
+        id: { type: 'integer' },
+        title: { type: 'string' },
+        category: { type: 'relation', relation: 'manyToOne', target: 'api::category.category' },
+      },
+    };
+
+    const modelsForPopulate: Record<string, any> = {
+      'admin::user': adminUserModel,
+      'api::category.category': categoryModel,
+      'api::product.product': productModel,
+    };
+
+    const getModelForPopulate = (uid: string) => modelsForPopulate[uid];
+    const ctx: any = { schema: productModel, getModel: getModelForPopulate };
+
+    test('removes private fields from nested filters in populate', async () => {
+      const populate = {
+        category: {
+          filters: {
+            createdBy: {
+              email: { $startsWith: 'admin' },
+            },
+          },
+        },
+      };
+
+      const result = await sanitizers.defaultSanitizePopulate(ctx, populate);
+
+      // The sanitizer removes private fields and also cleans up empty objects
+      expect(result).toEqual({
+        category: {
+          filters: {},
+        },
+      });
+    });
+
+    test('removes private fields from nested sort in populate', async () => {
+      const populate = {
+        category: {
+          sort: {
+            createdBy: {
+              resetPasswordToken: 'asc',
+            },
+          },
+        },
+      };
+
+      const result = await sanitizers.defaultSanitizePopulate(ctx, populate);
+
+      // The sanitizer removes private fields and sets empty relations to undefined
+      expect(result).toEqual({
+        category: {
+          sort: {
+            createdBy: undefined,
+          },
+        },
+      });
+    });
+
+    test('keeps public fields in nested filters/sort', async () => {
+      const populate = {
+        category: {
+          filters: {
+            createdBy: {
+              firstname: 'John',
+            },
+          },
+          sort: {
+            updatedBy: {
+              lastname: 'asc',
+            },
+          },
+        },
+      };
+
+      const result = await sanitizers.defaultSanitizePopulate(ctx, populate);
+
+      expect(result).toEqual({
+        category: {
+          filters: {
+            createdBy: {
+              firstname: 'John',
+            },
+          },
+          sort: {
+            updatedBy: {
+              lastname: 'asc',
+            },
+          },
+        },
+      });
+    });
+
+    test('removes password fields from nested filters in populate', async () => {
+      const populate = {
+        category: {
+          filters: {
+            createdBy: {
+              password: { $startsWith: '$2' },
+            },
+          },
+        },
+      };
+
+      const result = await sanitizers.defaultSanitizePopulate(ctx, populate);
+
+      // The sanitizer removes password fields and also cleans up empty objects
+      expect(result).toEqual({
+        category: {
+          filters: {},
+        },
+      });
+    });
+  });
+
+  describe('removeRestrictedRelations', () => {
+    const auth = {};
+    const data = {};
+    const creatorKeys = [CREATED_BY_ATTRIBUTE, UPDATED_BY_ATTRIBUTE];
+    const removeRestrictedRelationsFn = visitors.removeRestrictedRelations(auth);
+    const attribute = {
+      type: 'relation',
+      relation: 'oneToOne',
+      target: 'admin::user',
+    };
+
+    beforeEach(() => {
+      global.strapi = {
+        auth: {
+          verify(_auth: unknown, { scope }: { scope: string }) {
+            if (scope === 'admin::user.find') {
+              throw new Error('Unauthorized');
+            }
+
+            return true;
+          },
+        },
+      } as any;
+    });
+
+    test('keeps creator relations with populateCreatorFields true', async () => {
+      const remove = jest.fn();
+      const set = jest.fn();
+      const promises = creatorKeys.map(async (key) => {
+        await removeRestrictedRelationsFn(
+          {
+            data,
+            key,
+            attribute,
+            schema: {
+              kind: 'collectionType',
+              info: {
+                singularName: 'test',
+                pluralName: 'tests',
+              },
+              options: { populateCreatorFields: true },
+              attributes: {},
+            },
+            value: {},
+            path: {
+              attribute: null,
+              raw: null,
+            },
+          },
+          { remove, set }
+        );
+      });
+      await Promise.all(promises);
+
+      expect(remove).toHaveBeenCalledTimes(0);
+      expect(set).toHaveBeenCalledTimes(0);
+    });
+
+    test('removes creator relations with populateCreatorFields false', async () => {
+      const remove = jest.fn();
+      const set = jest.fn();
+      const promises = creatorKeys.map(async (key) => {
+        await removeRestrictedRelationsFn(
+          {
+            data,
+            key,
+            attribute,
+            schema: {
+              kind: 'collectionType',
+              info: {
+                singularName: 'test',
+                pluralName: 'tests',
+              },
+              options: { populateCreatorFields: false },
+              attributes: {},
+            },
+            value: {},
+            path: {
+              attribute: null,
+              raw: null,
+            },
+          },
+          { remove, set }
+        );
+      });
+      await Promise.all(promises);
+
+      expect(remove).toHaveBeenCalledTimes(creatorKeys.length);
+      creatorKeys.forEach((key) => expect(remove).toHaveBeenCalledWith(key));
+      expect(set).toHaveBeenCalledTimes(0);
+    });
+
+    test('removes unauthorized morphToOne relation targets from output', async () => {
+      const remove = jest.fn();
+      const set = jest.fn();
+      const morphToOneAttribute = {
+        type: 'relation',
+        relation: 'morphToOne',
+      };
+
+      await removeRestrictedRelationsFn(
+        {
+          data: {
+            related: {
+              id: 1,
+              __type: 'admin::user',
+              firstname: 'Private',
+              email: 'private@example.test',
+            },
+          },
+          key: 'related',
+          attribute: morphToOneAttribute,
+          schema: {
+            kind: 'collectionType',
+            info: {
+              singularName: 'test',
+              pluralName: 'tests',
+            },
+            options: {},
+            attributes: {
+              related: morphToOneAttribute,
+            },
+          },
+          value: {},
+          path: {
+            attribute: null,
+            raw: null,
+          },
+        },
+        { remove, set }
+      );
+
+      expect(remove).toHaveBeenCalledWith('related');
+      expect(set).toHaveBeenCalledTimes(0);
+    });
+
+    test('removes morphToMany relation output when all targets are unauthorized', async () => {
+      const remove = jest.fn();
+      const set = jest.fn();
+      const morphToManyAttribute = {
+        type: 'relation',
+        relation: 'morphToMany',
+      };
+
+      await removeRestrictedRelationsFn(
+        {
+          data: {
+            related: [
+              {
+                id: 1,
+                __type: 'admin::user',
+                firstname: 'Private',
+                email: 'private@example.test',
+              },
+            ],
+          },
+          key: 'related',
+          attribute: morphToManyAttribute,
+          schema: {
+            kind: 'collectionType',
+            info: {
+              singularName: 'test',
+              pluralName: 'tests',
+            },
+            options: {},
+            attributes: {
+              related: morphToManyAttribute,
+            },
+          },
+          value: {},
+          path: {
+            attribute: null,
+            raw: null,
+          },
+        },
+        { remove, set }
+      );
+
+      expect(remove).toHaveBeenCalledWith('related');
+      expect(set).toHaveBeenCalledTimes(0);
+    });
+
+    test('keeps authorized morphToOne relation target as an object', async () => {
+      const remove = jest.fn();
+      const set = jest.fn();
+      const morphToOneAttribute = {
+        type: 'relation',
+        relation: 'morphToOne',
+      };
+      const related = {
+        id: 1,
+        __type: 'api::allowed.allowed',
+        title: 'Allowed',
+      };
+
+      await removeRestrictedRelationsFn(
+        {
+          data: {
+            related,
+          },
+          key: 'related',
+          attribute: morphToOneAttribute,
+          schema: {
+            kind: 'collectionType',
+            info: {
+              singularName: 'test',
+              pluralName: 'tests',
+            },
+            options: {},
+            attributes: {
+              related: morphToOneAttribute,
+            },
+          },
+          value: {},
+          path: {
+            attribute: null,
+            raw: null,
+          },
+        },
+        { remove, set }
+      );
+
+      expect(remove).toHaveBeenCalledTimes(0);
+      expect(set).toHaveBeenCalledWith('related', related);
+    });
+
+    test('keeps mixed morphToMany relation output after stripping unauthorized targets', async () => {
+      const remove = jest.fn();
+      const set = jest.fn();
+      const morphToManyAttribute = {
+        type: 'relation',
+        relation: 'morphToMany',
+      };
+      const allowed = {
+        id: 1,
+        __type: 'api::allowed.allowed',
+        title: 'Allowed',
+      };
+      const denied = {
+        id: 2,
+        __type: 'admin::user',
+        firstname: 'Private',
+      };
+
+      await removeRestrictedRelationsFn(
+        {
+          data: {
+            related: [allowed, denied],
+          },
+          key: 'related',
+          attribute: morphToManyAttribute,
+          schema: {
+            kind: 'collectionType',
+            info: {
+              singularName: 'test',
+              pluralName: 'tests',
+            },
+            options: {},
+            attributes: {
+              related: morphToManyAttribute,
+            },
+          },
+          value: {},
+          path: {
+            attribute: null,
+            raw: null,
+          },
+        },
+        { remove, set }
+      );
+
+      expect(remove).toHaveBeenCalledTimes(0);
+      expect(set).toHaveBeenCalledWith('related', [allowed]);
+    });
+
+    test('preserves empty morphToMany relation output', async () => {
+      const remove = jest.fn();
+      const set = jest.fn();
+      const morphToManyAttribute = {
+        type: 'relation',
+        relation: 'morphToMany',
+      };
+
+      await removeRestrictedRelationsFn(
+        {
+          data: {
+            related: [],
+          },
+          key: 'related',
+          attribute: morphToManyAttribute,
+          schema: {
+            kind: 'collectionType',
+            info: {
+              singularName: 'test',
+              pluralName: 'tests',
+            },
+            options: {},
+            attributes: {
+              related: morphToManyAttribute,
+            },
+          },
+          value: {},
+          path: {
+            attribute: null,
+            raw: null,
+          },
+        },
+        { remove, set }
+      );
+
+      expect(remove).toHaveBeenCalledTimes(0);
+      expect(set).toHaveBeenCalledTimes(0);
+    });
+  });
+
+  /**
+   * The scope decision memo is keyed on the request's `auth` object, so the first entity
+   * of a response populates it and every entity after that reads the cached answer. These
+   * tests pin that the cached answer is still applied, because the failure mode this memo
+   * could introduce is a restricted relation being stripped from the first entity of a
+   * list and surviving on the rest.
+   *
+   * Driven through `traverseEntity` rather than by calling the visitor directly, so the
+   * memo is exercised the way a real sanitized response exercises it.
+   */
+  describe('removeRestrictedRelations - scope decisions across a list of entities', () => {
+    const restrictedSchema = {
+      kind: 'collectionType',
+      info: { singularName: 'article', pluralName: 'articles' },
+      options: {},
+      attributes: {
+        title: { type: 'string' },
+        secretRelation: { type: 'relation', relation: 'oneToOne', target: 'api::secret.secret' },
+      },
+    } as any;
+
+    const secretModel = {
+      kind: 'collectionType',
+      info: { singularName: 'secret', pluralName: 'secrets' },
+      attributes: { name: { type: 'string' } },
+    } as any;
+
+    const getModelWithSecret = (uid: string) =>
+      uid === 'api::secret.secret' ? secretModel : getModel(uid);
+
+    const makePage = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        title: `entity-${i}`,
+        secretRelation: { name: `secret-${i}` },
+      }));
+
+    // `global.strapi` is assigned without being restored, matching the other suites here.
+    // The test setup installs a setter that mutates whatever it is given, so assigning the
+    // previous value back (commonly `undefined`) throws.
+
+    test('strips the restricted relation from every entity in the page, not just the first', async () => {
+      const verify = jest.fn().mockRejectedValue(new Error('Forbidden'));
+      global.strapi = { auth: { verify } } as any;
+
+      // One visitor instance for the whole response, matching how sanitizeOutput builds it
+      // once per request. A per-entity instance would not share the memo at all.
+      const auth = { strategy: 'api-token', credentials: null };
+      const visitor = visitors.removeRestrictedRelations(auth);
+
+      const [first, ...rest] = makePage(3);
+
+      // The first entity is sanitized on its own so its decision is definitely written to
+      // the memo before the others read it. Sanitizing the whole page concurrently does
+      // not exercise the cache at all: every branch calls `verify` before any of them has
+      // written a decision, so the read path this memo introduces is never taken.
+      const sanitizedFirst = await traverseEntity(
+        visitor,
+        { schema: restrictedSchema, getModel: getModelWithSecret },
+        first
+      );
+
+      const sanitizedRest = await Promise.all(
+        rest.map((entity) =>
+          traverseEntity(
+            visitor,
+            { schema: restrictedSchema, getModel: getModelWithSecret },
+            entity
+          )
+        )
+      );
+
+      const sanitized = [sanitizedFirst, ...sanitizedRest];
+
+      expect(sanitized).toHaveLength(3);
+      sanitized.forEach((entity, i) => {
+        expect(entity).not.toHaveProperty('secretRelation');
+        expect(entity).toHaveProperty('title', `entity-${i}`);
+      });
+    });
+
+    test('keeps the relation on every entity when the scope is allowed', async () => {
+      const verify = jest.fn().mockResolvedValue(undefined);
+      global.strapi = { auth: { verify } } as any;
+
+      const auth = { strategy: 'api-token', credentials: null };
+      const visitor = visitors.removeRestrictedRelations(auth);
+
+      const sanitized = await Promise.all(
+        makePage(3).map((entity) =>
+          traverseEntity(
+            visitor,
+            { schema: restrictedSchema, getModel: getModelWithSecret },
+            entity
+          )
+        )
+      );
+
+      sanitized.forEach((entity, i) => {
+        expect(entity).toHaveProperty('secretRelation');
+        expect(entity).toHaveProperty('title', `entity-${i}`);
+      });
+    });
+
+    test('a denial cached from one entity does not leak access to later entities', async () => {
+      // Sequential rather than concurrent, so the first traversal has definitely written
+      // its decision to the memo before the others read it. This is the exact ordering the
+      // memo makes possible and the one a per-call check could never hit.
+      const verify = jest.fn().mockRejectedValue(new Error('Forbidden'));
+      global.strapi = { auth: { verify } } as any;
+
+      const auth = { strategy: 'api-token', credentials: null };
+      const visitor = visitors.removeRestrictedRelations(auth);
+
+      const results = [];
+      for (const entity of makePage(4)) {
+        results.push(
+          // eslint-disable-next-line no-await-in-loop
+          await traverseEntity(
+            visitor,
+            { schema: restrictedSchema, getModel: getModelWithSecret },
+            entity
+          )
+        );
+      }
+
+      results.forEach((entity) => expect(entity).not.toHaveProperty('secretRelation'));
+
+      // The point of the memo: the scope was resolved once and reused, rather than
+      // re-verified (and re-thrown) for all four entities.
+      expect(verify).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('strictParams visitor - removes fields not in schema', () => {
+    const ctx = { schema: articleModel, getModel };
+
+    test('removes unrecognized field at root level', async () => {
+      const data = {
+        title: 'Test Article',
+        unrecognizedField: 'should be removed',
+      };
+
+      const result = await traverseEntity(visitors.removeUnrecognizedFields, ctx)(data);
+
+      expect(result).toStrictEqual({ title: 'Test Article' });
+    });
+
+    test('keeps recognized fields', async () => {
+      const data = {
+        title: 'Test Article',
+      };
+
+      const result = await traverseEntity(visitors.removeUnrecognizedFields, ctx)(data);
+
+      expect(result).toStrictEqual({ title: 'Test Article' });
+    });
+
+    test('removes multiple unrecognized fields', async () => {
+      const data = {
+        title: 'Test Article',
+        unrecognizedField1: 'should be removed',
+        unrecognizedField2: 'should also be removed',
+      };
+
+      const result = await traverseEntity(visitors.removeUnrecognizedFields, ctx)(data);
+
+      expect(result).toStrictEqual({ title: 'Test Article' });
+    });
+
+    test('allows special relation reordering fields', async () => {
+      const relationModel = {
+        uid: 'api::relation.relation',
+        modelType: 'contentType' as const,
+        kind: 'collectionType' as const,
+        info: { singularName: 'relation', pluralName: 'relations' },
+        options: {},
+        attributes: {
+          id: { type: 'integer' },
+          name: { type: 'string' },
+        },
+      };
+
+      const articleWithRelation = {
+        ...articleModel,
+        attributes: {
+          ...articleModel.attributes,
+          relation: {
+            type: 'relation',
+            relation: 'manyToMany',
+            target: 'api::relation.relation',
+          },
+        },
+      };
+
+      const getModelWithRelation = (uid: string) => {
+        if (uid === 'api::relation.relation') {
+          return relationModel;
+        }
+        return getModel(uid);
+      };
+
+      const data = {
+        title: 'Test Article',
+        relation: {
+          connect: [{ id: 1 }],
+          unrecognizedField: 'should be removed',
+        },
+      };
+
+      const relationCtx = { schema: articleWithRelation, getModel: getModelWithRelation };
+      const result = await traverseEntity(visitors.removeUnrecognizedFields, relationCtx)(data);
+
+      expect(result).toStrictEqual({
+        title: 'Test Article',
+        relation: {
+          connect: [{ id: 1 }],
+        },
+      });
+    });
+
+    test('keeps id fields in relation context', async () => {
+      const relationModel = {
+        uid: 'api::relation.relation',
+        modelType: 'contentType' as const,
+        kind: 'collectionType' as const,
+        info: { singularName: 'relation', pluralName: 'relations' },
+        options: {},
+        attributes: {
+          id: { type: 'integer' },
+          name: { type: 'string' },
+        },
+      };
+
+      const articleWithRelation = {
+        ...articleModel,
+        attributes: {
+          ...articleModel.attributes,
+          relation: {
+            type: 'relation',
+            relation: 'oneToOne',
+            target: 'api::relation.relation',
+          },
+        },
+      };
+
+      const getModelWithRelation = (uid: string) => {
+        if (uid === 'api::relation.relation') {
+          return relationModel;
+        }
+        return getModel(uid);
+      };
+
+      const data = {
+        title: 'Test Article',
+        relation: {
+          id: 1,
+        },
+      };
+
+      const relationCtx = { schema: articleWithRelation, getModel: getModelWithRelation };
+      const result = await traverseEntity(visitors.removeUnrecognizedFields, relationCtx)(data);
+
+      expect(result).toStrictEqual(data);
+    });
+
+    test('keeps id in component data', async () => {
+      const componentModel = {
+        uid: 'default.component',
+        modelType: 'component' as const,
+        info: { singularName: 'component', pluralName: 'components' },
+        options: {},
+        attributes: {
+          id: { type: 'integer' },
+          name: { type: 'string' },
+        },
+      };
+
+      const articleWithComponent = {
+        ...articleModel,
+        attributes: {
+          ...articleModel.attributes,
+          component: {
+            type: 'component',
+            component: 'default.component',
+          },
+        },
+      };
+
+      const getModelWithComponent = (uid: string) => {
+        if (uid === 'default.component') {
+          return componentModel;
+        }
+        return getModel(uid);
+      };
+
+      const data = {
+        title: 'Test Article',
+        component: {
+          id: 1,
+          name: 'Component Name',
+        },
+      };
+
+      const componentCtx = { schema: articleWithComponent, getModel: getModelWithComponent };
+      const result = await traverseEntity(visitors.removeUnrecognizedFields, componentCtx)(data);
+
+      expect(result).toStrictEqual(data);
+    });
+
+    test('keeps id fields in media attribute context', async () => {
+      const mediaModel = {
+        uid: 'plugin::upload.file',
+        modelType: 'contentType' as const,
+        kind: 'collectionType' as const,
+        info: { singularName: 'file', pluralName: 'files' },
+        options: {},
+        attributes: {
+          id: { type: 'integer' },
+          name: { type: 'string' },
+          url: { type: 'string' },
+        },
+      };
+
+      const articleWithMedia = {
+        ...articleModel,
+        attributes: {
+          ...articleModel.attributes,
+          image: {
+            type: 'media',
+            allowedTypes: ['images'],
+          },
+        },
+      };
+
+      const getModelWithMedia = (uid: string) => {
+        if (uid === 'plugin::upload.file') {
+          return mediaModel;
+        }
+        return getModel(uid);
+      };
+
+      const data = {
+        title: 'Test Article',
+        image: {
+          id: 1,
+        },
+      };
+
+      const mediaCtx = { schema: articleWithMedia, getModel: getModelWithMedia };
+      const result = await traverseEntity(visitors.removeUnrecognizedFields, mediaCtx)(data);
+
+      expect(result).toStrictEqual(data);
+    });
+  });
+});

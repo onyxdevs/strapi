@@ -1,6 +1,6 @@
 {
   "name": "@strapi/provider-upload-cloudinary",
-  "version": "4.0.0",
+  "version": "5.53.0",
   "description": "Cloudinary provider for strapi upload",
   "keywords": [
     "upload",
@@ -13,7 +13,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "git://github.com/strapi/strapi.git"
+    "url": "https://github.com/strapi/strapi.git",
+    "directory": "packages/providers/upload-cloudinary"
   },
   "license": "SEE LICENSE IN LICENSE",
   "author": {
@@ -28,20 +29,34 @@
       "url": "https://strapi.io"
     }
   ],
-  "main": "./lib",
-  "directories": {
-    "lib": "./lib"
-  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "source": "./src/index.ts",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/"
+  ],
   "scripts": {
-    "test": "echo \"no tests yet\""
+    "build": "run -T npm-run-all clean --parallel build:code build:types",
+    "build:code": "run -T  rollup -c",
+    "build:types": "run -T tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "clean": "run -T rimraf ./dist",
+    "lint": "run -T eslint . --max-warnings=0",
+    "test:ts": "run -T tsc -p tsconfig.json",
+    "watch": "run -T rollup -c -w"
   },
   "dependencies": {
-    "@strapi/utils": "4.0.0",
-    "cloudinary": "^1.25.1",
+    "@strapi/utils": "5.53.0",
+    "cloudinary": "^2.7.0",
     "into-stream": "^5.1.0"
   },
+  "devDependencies": {
+    "@types/node": "20.19.41",
+    "eslint-config-custom": "5.53.0",
+    "tsconfig": "5.53.0"
+  },
   "engines": {
-    "node": ">=12.x.x <=16.x.x",
+    "node": ">=20.0.0 <=26.x.x",
     "npm": ">=6.0.0"
   }
 }

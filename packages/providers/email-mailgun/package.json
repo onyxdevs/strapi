@@ -1,6 +1,6 @@
 {
   "name": "@strapi/provider-email-mailgun",
-  "version": "4.0.0",
+  "version": "5.53.0",
   "description": "Mailgun provider for strapi email plugin",
   "keywords": [
     "email",
@@ -13,7 +13,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "git://github.com/strapi/strapi.git"
+    "url": "https://github.com/strapi/strapi.git",
+    "directory": "packages/providers/email-mailgun"
   },
   "license": "SEE LICENSE IN LICENSE",
   "author": {
@@ -28,19 +29,38 @@
       "url": "https://strapi.io"
     }
   ],
-  "main": "./lib",
-  "directories": {
-    "lib": "./lib"
-  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "source": "./src/index.ts",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/"
+  ],
   "scripts": {
-    "test": "echo \"no tests yet\""
+    "build": "run -T npm-run-all clean --parallel build:code build:types",
+    "build:code": "run -T  rollup -c",
+    "build:types": "run -T tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "clean": "run -T rimraf ./dist",
+    "lint": "run -T eslint . --max-warnings=0",
+    "test:ts": "run -T tsc -p tsconfig.json",
+    "test:unit:vitest": "vitest run",
+    "test:unit:vitest:watch": "vitest --watch",
+    "watch": "run -T rollup -c -w"
   },
   "dependencies": {
-    "@strapi/utils": "4.0.0",
-    "mailgun-js": "0.22.0"
+    "@strapi/utils": "5.53.0",
+    "form-data": "4.0.6",
+    "mailgun.js": "10.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.41",
+    "eslint-config-custom": "5.53.0",
+    "tsconfig": "5.53.0",
+    "vitest": "catalog:",
+    "vitest-config": "5.53.0"
   },
   "engines": {
-    "node": ">=12.x.x <=16.x.x",
+    "node": ">=20.0.0 <=26.x.x",
     "npm": ">=6.0.0"
   }
 }

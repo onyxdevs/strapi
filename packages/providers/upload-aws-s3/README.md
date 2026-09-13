@@ -7,7 +7,7 @@
 ## Links
 
 - [Strapi website](https://strapi.io/)
-- [Strapi documentation](https://docs.strapi.io)
+- [Strapi documentation](https://docs.strapi.io/cms/configurations/media-library-providers/amazon-s3)
 - [Strapi community on Discord](https://discord.strapi.io)
 - [Strapi news on Twitter](https://twitter.com/strapijs)
 
@@ -21,15 +21,24 @@ yarn add @strapi/provider-upload-aws-s3
 npm install @strapi/provider-upload-aws-s3 --save
 ```
 
-## Configurations
+## Configuration
 
-Your configuration is passed down to the provider. (e.g: `new AWS.S3(config)`). You can see the complete list of options [here](https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html#constructor-property)
+- `provider` defines the name of the provider
+- `providerOptions` is passed down during the construction of the provider. (ex: `new AWS.S3(config)`). [Complete list of options](https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html#constructor-property)
+- `providerOptions.params` is passed directly to the parameters to each method respectively.
+  - `ACL` is the access control list for the object. Defaults to `public-read`.
+  - `signedUrlExpires` is the number of seconds before a signed URL expires. (See [how signed URLs work](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-signed-urls.html)). Defaults to 15 minutes and URLs are only signed when ACL is set to `private`.
+  - `Bucket` is the name of the bucket to upload to.
+- `providerOptions.providerConfig` contains extended configuration options (see below).
+- `actionOptions` is passed directly to the parameters to each method respectively. You can find the complete list of [upload/ uploadStream options](https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html#upload-property) and [delete options](https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/S3.html#deleteObject-property)
 
-See the [using a provider](https://docs.strapi.io/developer-docs/latest/plugins/upload.html#using-a-provider) documentation for information on installing and using a provider. And see the [environment variables](https://docs.strapi.io/developer-docs/latest/setup-deployment-guides/configurations/optional/environment.html#environment-variables) for setting and using environment variables in your configs.
+See the [documentation about using a provider](https://docs.strapi.io/developer-docs/latest/plugins/upload.html#using-a-provider) for information on installing and using a provider. To understand how environment variables are used in Strapi, please refer to the [documentation about environment variables](https://docs.strapi.io/developer-docs/latest/setup-deployment-guides/configurations/optional/environment.html#environment-variables).
 
-### Provider Configuration
+If you're using the bucket as a CDN and deliver the content on a custom domain, you can get use of the `baseUrl` and `rootPath` properties to configure how your assets' urls will be saved inside Strapi.
 
-`./config/plugins.js`
+### Basic Provider Configuration
+
+`./config/plugins.js` or `./config/plugins.ts` for TypeScript projects:
 
 ```js
 module.exports = ({ env }) => ({
@@ -38,12 +47,25 @@ module.exports = ({ env }) => ({
     config: {
       provider: 'aws-s3',
       providerOptions: {
-        accessKeyId: env('AWS_ACCESS_KEY_ID'),
-        secretAccessKey: env('AWS_ACCESS_SECRET'),
-        region: env('AWS_REGION'),
-        params: {
-          Bucket: env('AWS_BUCKET'),
+        baseUrl: env('CDN_URL'),
+        rootPath: env('CDN_ROOT_PATH'),
+        s3Options: {
+          credentials: {
+            accessKeyId: env('AWS_ACCESS_KEY_ID'),
+            secretAccessKey: env('AWS_ACCESS_SECRET'),
+          },
+          region: env('AWS_REGION'),
+          params: {
+            ACL: env('AWS_ACL', 'public-read'),
+            signedUrlExpires: env('AWS_SIGNED_URL_EXPIRES', 15 * 60),
+            Bucket: env('AWS_BUCKET'),
+          },
         },
+      },
+      actionOptions: {
+        upload: {},
+        uploadStream: {},
+        delete: {},
       },
     },
   },
@@ -51,43 +73,49 @@ module.exports = ({ env }) => ({
 });
 ```
 
-### Security Middleware Configuration
-
-Due to the default settings in the Strapi Security Middleware you will need to modify the `contentSecurityPolicy` settings to properly see thumbnail previews in the Media Library. You should replace `strapi::security` string with the object bellow instead as explained in the [middleware configuration](https://docs.strapi.io/developer-docs/latest/setup-deployment-guides/configurations/required/middlewares.html#loading-order) documentation.
-
-`./config/middlewares.js`
+## Extended Provider Configuration
 
 ```js
-module.exports = [
-  // ...
-  {
-    name: 'strapi::security',
+module.exports = ({ env }) => ({
+  upload: {
     config: {
-      contentSecurityPolicy: {
-        useDefaults: true,
-        directives: {
-          'connect-src': ["'self'", 'https:'],
-          'img-src': ["'self'", 'data:', 'blob:', 'yourBucketName.s3.yourRegion.amazonaws.com'],
-          'media-src': ["'self'", 'data:', 'blob:', 'yourBucketName.s3.yourRegion.amazonaws.com'],
-          upgradeInsecureRequests: null,
+      provider: 'aws-s3',
+      providerOptions: {
+        baseUrl: env('CDN_URL'),
+        rootPath: env('CDN_ROOT_PATH'),
+        s3Options: {
+          credentials: {
+            accessKeyId: env('AWS_ACCESS_KEY_ID'),
+            secretAccessKey: env('AWS_ACCESS_SECRET'),
+          },
+          region: env('AWS_REGION'),
+          params: {
+            ACL: 'private',
+            signedUrlExpires: 15 * 60,
+            Bucket: env('AWS_BUCKET'),
+          },
+        },
+        providerConfig: {
+          checksumAlgorithm: 'CRC64NVME',
+          preventOverwrite: true,
+          storageClass: 'INTELLIGENT_TIERING',
+          encryption: {
+            type: 'aws:kms',
+            kmsKeyId: env('AWS_KMS_KEY_ID'),
+          },
+          tags: {
+            application: 'strapi',
+            environment: env('NODE_ENV'),
+          },
+          multipart: {
+            partSize: 10 * 1024 * 1024,
+            queueSize: 4,
+          },
         },
       },
     },
   },
-  // ...
-];
+});
 ```
 
-## Required AWS Policy Actions
-
-These are the minimum amount of permissions needed for this provider to work.
-
-```json
-"Action": [
-  "s3:PutObject",
-  "s3:GetObject",
-  "s3:ListBucket",
-  "s3:DeleteObject",
-  "s3:PutObjectAcl"
-],
-```
+Many additional configuration options and best practices are described in the [official documentation](https://docs.strapi.io//cms/configurations/media-library-providers/amazon-s3)

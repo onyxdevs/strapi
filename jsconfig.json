@@ -8,13 +8,19 @@
     "**/node_modules/*",
     ".git",
     ".npm",
+    ".nx",
     "**/.cache/*",
     "**/.tmp/*",
     "**/dist/*",
     "**/build/*",
     "**/*.test.js",
-    "**/*.test.e2e.js",
-    "**/examples/getstarted/*",
-    "**/examples/kitchensink/*"
+    "**/*.test.api.js",
+    "docs",
+    "examples",
+    "templates",
+    ".github",
+    "packages",
+    "scripts",
+    "tests"
   ]
 }

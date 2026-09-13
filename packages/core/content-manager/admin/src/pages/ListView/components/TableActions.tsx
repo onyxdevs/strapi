@@ -1,0 +1,295 @@
+import * as React from 'react';
+
+import {
+  DescriptionComponentRenderer,
+  useNotification,
+  useStrapiApp,
+  useQueryParams,
+} from '@strapi/admin/strapi-admin';
+import { Button, LinkButton, Modal } from '@strapi/design-system';
+import { Duplicate, ExternalLink, Pencil } from '@strapi/icons';
+import { stringify } from 'qs';
+import { useIntl } from 'react-intl';
+import { NavLink, useHref, useNavigate } from 'react-router-dom';
+import { styled } from 'styled-components';
+
+import { useDocumentRBAC } from '../../../features/DocumentRBAC';
+import { Document, useDoc } from '../../../hooks/useDocument';
+import { useDocumentActions } from '../../../hooks/useDocumentActions';
+import { isBaseQueryError } from '../../../utils/api';
+import { DocumentActionsMenu } from '../../EditView/components/DocumentActions';
+
+import { AutoCloneFailureModalBody } from './AutoCloneFailureModal';
+
+import type { ProhibitedCloningField } from '../../../../../shared/contracts/collection-types';
+import type {
+  ContentManagerPlugin,
+  DocumentActionComponent,
+  DocumentActionProps,
+} from '../../../content-manager';
+
+/* -------------------------------------------------------------------------------------------------
+ * TableActions
+ * -----------------------------------------------------------------------------------------------*/
+
+interface TableActionsProps {
+  document: Document;
+}
+
+const TableActions = ({ document }: TableActionsProps) => {
+  const { formatMessage } = useIntl();
+  const { model, collectionType } = useDoc();
+  const plugins = useStrapiApp('TableActions', (state) => state.plugins);
+
+  const props: DocumentActionProps = {
+    activeTab: null,
+    model,
+    documentId: document.documentId,
+    collectionType,
+    document,
+  };
+
+  return (
+    <DescriptionComponentRenderer
+      props={props}
+      descriptions={(plugins['content-manager'].apis as ContentManagerPlugin['config']['apis'])
+        .getDocumentActions('table-row')
+        // We explicitly remove the PublishAction from description so we never render it and we don't make unnecessary requests.
+        .filter((action) => action.name !== 'PublishAction')}
+    >
+      {(actions) => {
+        const tableRowActions = actions.filter((action) => {
+          const positions = Array.isArray(action.position) ? action.position : [action.position];
+          return positions.includes('table-row');
+        });
+
+        return (
+          <DocumentActionsMenu
+            actions={tableRowActions}
+            label={formatMessage({
+              id: 'content-manager.containers.list.table.row-actions',
+              defaultMessage: 'Row actions',
+            })}
+            variant="ghost"
+          />
+        );
+      }}
+    </DescriptionComponentRenderer>
+  );
+};
+
+/* -------------------------------------------------------------------------------------------------
+ * TableActionComponents
+ * -----------------------------------------------------------------------------------------------*/
+
+const EditAction: DocumentActionComponent = ({ documentId }) => {
+  const navigate = useNavigate();
+  const { formatMessage } = useIntl();
+  const { canRead } = useDocumentRBAC('EditAction', ({ canRead }) => ({ canRead }));
+  const { toggleNotification } = useNotification();
+  const [{ query }] = useQueryParams<{ plugins?: object }>();
+
+  return {
+    disabled: !canRead,
+    icon: <StyledPencil />,
+    label: formatMessage({
+      id: 'content-manager.actions.edit.label',
+      defaultMessage: 'Edit',
+    }),
+    position: 'table-row',
+    onClick: async () => {
+      if (!documentId) {
+        console.error(
+          "You're trying to edit a document without an id, this is likely a bug with Strapi. Please open an issue."
+        );
+
+        toggleNotification({
+          message: formatMessage({
+            id: 'content-manager.actions.edit.error',
+            defaultMessage: 'An error occurred while trying to edit the document.',
+          }),
+          type: 'danger',
+        });
+
+        return;
+      }
+
+      navigate({
+        pathname: documentId,
+        search: stringify({
+          plugins: query.plugins,
+        }),
+      });
+    },
+  };
+};
+
+EditAction.type = 'edit';
+EditAction.position = 'table-row';
+
+/**
+ * Because the icon system is completely broken, we have to do
+ * this to remove the fill from the cog.
+ */
+const StyledPencil = styled(Pencil)`
+  path {
+    fill: currentColor;
+  }
+`;
+
+const OpenInNewTabAction: DocumentActionComponent = ({ documentId }) => {
+  const { formatMessage } = useIntl();
+  const { canRead } = useDocumentRBAC('OpenInNewTabAction', ({ canRead }) => ({ canRead }));
+  const [{ query }] = useQueryParams<{ plugins?: object }>();
+
+  // Resolve the entry's absolute URL (incl. router basename) so we can open it
+  // in a real new browser tab. The primary list-view cell is also a link, this
+  // gives the same affordance an explicit, discoverable menu entry.
+  const href = useHref({
+    pathname: documentId ?? '',
+    search: stringify({ plugins: query.plugins }),
+  });
+
+  return {
+    disabled: !canRead || !documentId,
+    icon: <StyledExternalLink />,
+    label: formatMessage({
+      id: 'content-manager.actions.open-in-new-tab.label',
+      defaultMessage: 'Open in new tab',
+    }),
+    position: 'table-row',
+    onClick: () => {
+      window.open(href, '_blank', 'noopener,noreferrer');
+    },
+  };
+};
+
+// No `type` is set: it's an optional discriminator constrained to a known union
+// and this action is identified by its component name instead.
+OpenInNewTabAction.position = 'table-row';
+
+const StyledExternalLink = styled(ExternalLink)`
+  path {
+    fill: currentColor;
+  }
+`;
+
+const CloneAction: DocumentActionComponent = ({ model, documentId }) => {
+  const navigate = useNavigate();
+  const { formatMessage } = useIntl();
+  const { canCreate } = useDocumentRBAC('CloneAction', ({ canCreate }) => ({ canCreate }));
+  const { toggleNotification } = useNotification();
+  const { autoClone } = useDocumentActions();
+  const [prohibitedFields, setProhibitedFields] = React.useState<ProhibitedCloningField[]>([]);
+  const [{ query }] = useQueryParams<{ plugins?: { i18n?: { locale?: string } } }>();
+
+  return {
+    disabled: !canCreate,
+    icon: <StyledDuplicate />,
+    label: formatMessage({
+      id: 'content-manager.actions.clone.label',
+      defaultMessage: 'Duplicate',
+    }),
+    position: 'table-row',
+    onClick: async () => {
+      if (!documentId) {
+        console.error(
+          "You're trying to clone a document in the table without an id, this is likely a bug with Strapi. Please open an issue."
+        );
+
+        toggleNotification({
+          message: formatMessage({
+            id: 'content-manager.actions.clone.error',
+            defaultMessage: 'An error occurred while trying to clone the document.',
+          }),
+          type: 'danger',
+        });
+
+        return;
+      }
+
+      const res = await autoClone({
+        model,
+        sourceId: documentId,
+        locale: query.plugins?.i18n?.locale,
+      });
+
+      if ('data' in res) {
+        navigate({
+          pathname: res.data.documentId,
+          search: stringify({
+            plugins: query.plugins,
+          }),
+        });
+
+        /**
+         * We return true because we don't need to show a modal anymore.
+         */
+        return true;
+      }
+
+      if (
+        isBaseQueryError(res.error) &&
+        res.error.details &&
+        typeof res.error.details === 'object' &&
+        'prohibitedFields' in res.error.details &&
+        Array.isArray(res.error.details.prohibitedFields)
+      ) {
+        const prohibitedFields = res.error.details.prohibitedFields as ProhibitedCloningField[];
+
+        setProhibitedFields(prohibitedFields);
+      }
+    },
+    dialog: {
+      type: 'modal',
+      title: formatMessage({
+        id: 'content-manager.containers.list.autoCloneModal.header',
+        defaultMessage: 'Duplicate',
+      }),
+      content: <AutoCloneFailureModalBody prohibitedFields={prohibitedFields} />,
+      footer: ({ onClose }) => {
+        return (
+          <Modal.Footer>
+            <Button onClick={onClose} variant="tertiary">
+              {formatMessage({
+                id: 'cancel',
+                defaultMessage: 'Cancel',
+              })}
+            </Button>
+            <LinkButton
+              tag={NavLink}
+              to={{
+                pathname: `clone/${documentId}`,
+                search: stringify({
+                  plugins: query.plugins,
+                }),
+              }}
+            >
+              {formatMessage({
+                id: 'content-manager.containers.list.autoCloneModal.create',
+                defaultMessage: 'Create',
+              })}
+            </LinkButton>
+          </Modal.Footer>
+        );
+      },
+    },
+  };
+};
+
+CloneAction.type = 'clone';
+CloneAction.position = 'table-row';
+
+/**
+ * Because the icon system is completely broken, we have to do
+ * this to remove the fill from the cog.
+ */
+const StyledDuplicate = styled(Duplicate)`
+  path {
+    fill: currentColor;
+  }
+`;
+
+const DEFAULT_TABLE_ROW_ACTIONS = [EditAction, OpenInNewTabAction, CloneAction];
+
+export { TableActions, DEFAULT_TABLE_ROW_ACTIONS };

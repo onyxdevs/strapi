@@ -1,0 +1,210 @@
+import { test, expect } from '@playwright/test';
+import { login } from '../../../utils/login';
+import { resetDatabaseAndImportDataFromPath } from '../../../utils/dts-import';
+import {
+  clickAndWait,
+  describeOnCondition,
+  findAndClose,
+  navToHeader,
+} from '../../../utils/shared';
+
+const waitForAssigneeUpdate = (page) =>
+  page.waitForResponse(
+    (response) =>
+      response.request().method() === 'PUT' && response.url().includes('/assignee') && response.ok()
+  );
+
+const waitForStageUpdate = (page) =>
+  page.waitForResponse(
+    (response) =>
+      response.request().method() === 'PUT' && response.url().includes('/stage') && response.ok()
+  );
+
+const goBackToArticleList = async (page) => {
+  await navToHeader(page, ['Content Manager', 'Article'], 'Article');
+};
+
+const edition = process.env.STRAPI_DISABLE_EE === 'true' ? 'CE' : 'EE';
+
+const checkAssignee = async (page) => {
+  /**
+   * Check the assignee combobox exists and set the assignee to our editor
+   */
+  await expect(page.getByRole('combobox', { name: 'Assignee' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Assignee' }).click();
+  const assigneeUpdated = waitForAssigneeUpdate(page);
+  await page.getByRole('option', { name: 'editor testing' }).click();
+  await assigneeUpdated;
+
+  await findAndClose(page, 'Assignee updated');
+
+  /**
+   * Double check it's updated correctly, this would fail if
+   * the document is not updated with the assignee as we
+   * refetch said document.
+   */
+  await expect(page.getByRole('combobox', { name: 'Assignee' })).toHaveValue('editor testing');
+};
+
+const checkStage = async (page) => {
+  /**
+   * Check the stage combobox exists and set the stage to in progress
+   */
+  await expect(page.getByRole('combobox', { name: 'Review stage' })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Review stage' }).click();
+  const stageUpdated = waitForStageUpdate(page);
+  await page.getByRole('option', { name: 'In progress' }).click();
+  await stageUpdated;
+
+  await findAndClose(page, 'Review stage updated');
+
+  /**
+   * Double check it's updated correctly, this would fail if
+   * the document is not updated with the stage as we
+   * refetch said document.
+   */
+  await expect(page.getByRole('combobox', { name: 'Review stage' })).toHaveText('In progress');
+};
+
+describeOnCondition(edition === 'EE')('content-manager', () => {
+  test.beforeEach(async ({ page }) => {
+    await resetDatabaseAndImportDataFromPath('with-admin');
+    await page.goto('/admin');
+    await login({ page });
+  });
+
+  test('I want to assign a document to a user and see this update in the list-view afterwards', async ({
+    page,
+  }) => {
+    /**
+     * Navigate to content-type
+     */
+    await page.getByRole('link', { name: 'Content Manager' }).click();
+    await page.getByRole('gridcell', { name: 'West Ham post match analysis' }).click();
+
+    await checkAssignee(page);
+
+    /**
+     * Go back to ensure the list view has correctly updated
+     */
+    await goBackToArticleList(page);
+    await expect(page.getByRole('gridcell', { name: 'editor testing' })).toBeVisible();
+
+    /**
+     * Finally, go back to our content-type to assert that it did indeed update
+     */
+    await page.getByRole('gridcell', { name: 'West Ham post match analysis' }).click();
+    await expect(page.getByRole('combobox', { name: 'Assignee' })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Assignee' })).toHaveValue('editor testing');
+  });
+
+  test('I want to change the stage of a document and see this update in the list-view afterwards', async ({
+    page,
+  }) => {
+    /**
+     * Navigate to content-type
+     */
+    await page.getByRole('link', { name: 'Content Manager' }).click();
+    await page.getByRole('gridcell', { name: 'West Ham post match analysis' }).click();
+
+    await checkStage(page);
+
+    /**
+     * Go back to ensure the list view has correctly updated
+     */
+    await goBackToArticleList(page);
+    await expect(page.getByRole('gridcell', { name: 'In progress' })).toBeVisible();
+
+    /**
+     * Finally, go back to our content-type to assert that it did indeed update
+     */
+    await page.getByRole('gridcell', { name: 'West Ham post match analysis' }).click();
+    await expect(page.getByRole('combobox', { name: 'Review stage' })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Review stage' })).toHaveText('In progress');
+  });
+
+  // Critical path #22 (workflows.review-stages): a full review lifecycle — assign a reviewer and
+  // move the document forward through every stage of the Default workflow, confirming each update
+  // persists and the list view reflects the final stage + assignee.
+  test(
+    'a reviewer can be assigned and the document moved through every review stage',
+    { tag: ['@release'] },
+    async ({ page }) => {
+      await page.getByRole('link', { name: 'Content Manager' }).click();
+      await page.getByRole('gridcell', { name: 'West Ham post match analysis' }).click();
+
+      // Assign a reviewer.
+      await checkAssignee(page);
+
+      // Move through each subsequent stage of the Default workflow in order.
+      for (const stage of ['Ready to review', 'In progress', 'Reviewed']) {
+        await page.getByRole('combobox', { name: 'Review stage' }).click();
+        const stageUpdated = waitForStageUpdate(page);
+        await page.getByRole('option', { name: stage }).click();
+        await stageUpdated;
+        await findAndClose(page, 'Review stage updated');
+        await expect(page.getByRole('combobox', { name: 'Review stage' })).toHaveText(stage);
+      }
+
+      // The list view reflects the final stage and the assignee.
+      await goBackToArticleList(page);
+      await expect(page.getByRole('gridcell', { name: 'Reviewed' })).toBeVisible();
+      await expect(page.getByRole('gridcell', { name: 'editor testing' })).toBeVisible();
+    }
+  );
+
+  describeOnCondition(process.env.STRAPI_FEATURES_UNSTABLE_PREVIEW_SIDE_EDITOR === 'true')(
+    'Unstable Preview',
+    () => {
+      test('I want to change the assignee of a document from preview and see this change in the edit and list views', async ({
+        page,
+      }) => {
+        // Open an edit view for a content type that has preview
+        await clickAndWait(page, page.getByRole('link', { name: 'Content Manager' }));
+        await clickAndWait(page, page.getByRole('link', { name: 'Article' }));
+        await clickAndWait(page, page.getByRole('gridcell', { name: /west ham post match/i }));
+
+        // Open the preview page
+        await clickAndWait(page, page.getByRole('link', { name: /open preview/i }));
+
+        await checkAssignee(page);
+
+        // Confirm the edit view updated
+        await clickAndWait(page, page.getByRole('link', { name: /close preview/i }));
+        await expect(page.getByRole('combobox', { name: 'Assignee' })).toBeVisible();
+        await expect(page.getByRole('combobox', { name: 'Assignee' })).toHaveValue(
+          'editor testing'
+        );
+
+        // Confirm the list view updated
+        await goBackToArticleList(page);
+        await expect(page.getByRole('gridcell', { name: 'editor testing' })).toBeVisible();
+      });
+
+      test('I want to change the stage of a document from preview and see this change in the edit and list views', async ({
+        page,
+      }) => {
+        // Open an edit view for a content type that has preview
+        await clickAndWait(page, page.getByRole('link', { name: 'Content Manager' }));
+        await clickAndWait(page, page.getByRole('link', { name: 'Article' }));
+        await clickAndWait(page, page.getByRole('gridcell', { name: /west ham post match/i }));
+
+        // Open the preview page
+        await clickAndWait(page, page.getByRole('link', { name: /open preview/i }));
+
+        await checkStage(page);
+
+        // Confirm the edit view updated
+        await clickAndWait(page, page.getByRole('link', { name: /close preview/i }));
+        await expect(page.getByRole('combobox', { name: 'Review stage' })).toBeVisible();
+        await expect(page.getByRole('combobox', { name: 'Review stage' })).toHaveText(
+          'In progress'
+        );
+
+        // Confirm the list view updated
+        await goBackToArticleList(page);
+        await expect(page.getByRole('gridcell', { name: 'In progress' })).toBeVisible();
+      });
+    }
+  );
+});

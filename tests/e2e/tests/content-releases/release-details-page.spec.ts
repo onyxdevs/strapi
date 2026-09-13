@@ -1,0 +1,180 @@
+import { type Page } from '@playwright/test';
+import { clickAndWait, describeOnCondition, findAndClose } from '../../../utils/shared';
+import { test, expect, releaseName } from './fixtures';
+
+const edition = process.env.STRAPI_DISABLE_EE === 'true' ? 'CE' : 'EE';
+
+const addEntryToRelease = async ({ page, releaseName }: { page: Page; releaseName: string }) => {
+  // Open the add to release dialog
+  await page.getByRole('button', { name: 'More document actions' }).click();
+  await page.getByRole('menuitem', { name: 'Add to release' }).click();
+  const addToReleaseDialog = await page.getByRole('dialog', { name: 'Add to release' });
+  await expect(addToReleaseDialog).toBeVisible();
+  await expect(
+    addToReleaseDialog.getByRole('radio', { name: 'publish', exact: true })
+  ).toBeChecked();
+  // Select a release
+  const submitReleaseButton = await page.getByRole('button', { name: 'Continue' });
+  await expect(submitReleaseButton).toBeDisabled();
+  await page.getByRole('combobox', { name: 'Select a release' }).click();
+  await page.getByRole('option', { name: releaseName }).click();
+  await expect(submitReleaseButton).toBeEnabled();
+  await submitReleaseButton.click();
+  // See the release the entry was added to
+  await findAndClose(page, 'Entry added to release');
+};
+
+describeOnCondition(edition === 'EE')('Release page', () => {
+  test('A user should be able to add collection-type and single-type entries to a release and publish the release', async ({
+    page,
+  }) => {
+    // Add a collection-type entry to the release
+    await page.getByRole('link', { name: 'Content Manager' }).click();
+    await page.getByRole('link', { name: 'Author' }).click();
+    await page.getByRole('gridcell', { name: 'Led Tasso' }).click();
+    await page.waitForURL('**/content-manager/collection-types/api::author.author/**');
+    await addEntryToRelease({ page, releaseName });
+
+    // Add a single-type entry to the release
+    await page.getByRole('link', { name: 'Content Manager' }).click();
+    await page.getByRole('link', { name: 'Upcoming Matches' }).click();
+    await page.waitForURL('**/content-manager/single-types/api::upcoming-match.upcoming-match**');
+    // Open the add to release dialog
+    await addEntryToRelease({ page, releaseName });
+
+    // Publish the release
+    await clickAndWait(page, page.getByRole('link', { name: 'Releases' }));
+    await clickAndWait(page, page.getByRole('link', { name: `${releaseName}` }));
+    await clickAndWait(page, page.getByRole('button', { name: 'Publish', exact: true }));
+    await expect(page.getByRole('heading', { name: releaseName })).toBeVisible();
+
+    // Check the already released release
+    await expect(page.getByRole('button', { name: 'Publish', exact: true })).not.toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Release edit and delete menu' })
+    ).not.toBeVisible();
+    await expect(page.getByRole('gridcell', { name: 'publish unpublish' })).not.toBeVisible();
+    await expect(
+      page.getByRole('gridcell', { name: 'This entry was published.' }).first()
+    ).toBeVisible();
+  });
+
+  test('after publishing a release, the CM list view reflects the new status without a manual refresh', async ({
+    cm,
+    releases,
+    details,
+  }) => {
+    // Add a collection-type entry (default "publish" action) to the release.
+    await cm.goToCollectionType('Author');
+    await cm.openEntry('Led Tasso');
+
+    await expect(cm.publishedTab).toBeDisabled();
+    await cm.addToRelease(releaseName);
+
+    // Publish the release.
+    await releases.goto();
+    await releases.openRelease(releaseName);
+    await details.publish();
+    // the release is published.
+    await expect(details.heading(releaseName)).toBeVisible();
+    await expect(details.publishButton).not.toBeVisible();
+
+    // Navigate straight to the CM list view (no browser refresh).
+    await cm.goToCollectionType('Author');
+    // the row already shows "Published"
+    await expect(cm.getRowStatus('Led Tasso', 'Published')).toBeVisible();
+  });
+
+  test('A user should be able to edit and delete a release', async ({ page }) => {
+    // Edit the release
+    await page.getByRole('button', { name: 'Release edit and delete menu' }).click();
+    await page.getByRole('menuitem', { name: 'Edit' }).click();
+    await expect(page.getByRole('dialog', { name: 'Edit release' })).toBeVisible();
+    await page.getByRole('textbox', { name: 'Name' }).fill('Trent Crimm: Independent');
+    await page.getByRole('button', { name: 'Save' }).click();
+    const editedEntryName = 'Trent Crimm: Independent';
+    await expect(page.getByRole('heading', { name: editedEntryName })).toBeVisible();
+
+    // Delete the release
+    await page.getByRole('button', { name: 'Release edit and delete menu' }).click();
+    await page.getByRole('menuitem', { name: 'Delete' }).click();
+    await page.getByRole('button', { name: 'Confirm' }).click();
+    // Wait for client side redirect to the releases page
+    await page.waitForURL('/admin/plugins/content-releases');
+    await expect(page.getByRole('link', { name: `${editedEntryName}` })).not.toBeVisible();
+  });
+
+  test("A user should be able to change the entry groupings, update an entry's action, remove an entry from a release, and navigate to the entry in the content manager", async ({
+    page,
+  }) => {
+    // Change the entry groupings
+    await expect(page.getByRole('separator', { name: 'Article' })).toBeVisible();
+    await expect(page.getByRole('separator', { name: 'Author' })).toBeVisible();
+    await page.getByLabel('Group by').click();
+    await page.getByRole('option', { name: 'Actions' }).click();
+    await expect(page.getByRole('separator', { name: 'publish', exact: true })).toBeVisible();
+    await expect(page.getByRole('separator', { name: 'unpublish' })).toBeVisible();
+
+    // Change the entry grouping
+    const row = await page.getByRole('row').filter({ hasText: 'West Ham post match analysis' });
+    // The first row after the header is NOT the one we will update
+    await expect(
+      page
+        .getByRole('row')
+        .nth(1)
+        .getByRole('gridcell', { name: 'Analyse post-match contre West Ham' })
+    ).toBeVisible();
+    // Update a given row's action
+    await expect(row.getByRole('radio').first()).not.toBeChecked();
+    row.locator('label').first().click();
+    await expect(row.getByRole('radio').first()).toBeChecked();
+    // The updated is now the first row after the header
+    await expect(
+      page.getByRole('row').nth(1).getByRole('gridcell', { name: 'West Ham post match analysis' })
+    ).toBeVisible();
+
+    // Navigate to a given row's entry in the content-manager
+    await row.getByRole('button', { name: 'Release action options' }).click();
+    await page.getByRole('menuitem', { name: 'Edit entry' }).click();
+    await page.waitForURL('**/content-manager/collection-types/api::article.article/**');
+    await expect(page.getByRole('heading', { name: 'West Ham post match analysis' })).toBeVisible();
+
+    // Return to release page
+    await page.goBack();
+    await page.waitForURL('/admin/plugins/content-releases/*');
+
+    // Remove a given row's entry from the release
+    await row.getByRole('button', { name: 'Release action options' }).click();
+    await page.getByRole('menuitem', { name: 'Remove from release' }).click();
+    await expect(row).not.toBeVisible();
+  });
+
+  // Critical path #23 (workflows.releases-atomic-publish): the seeded release contains a mix of
+  // publish and unpublish actions. Applying it must execute every action in one atomic operation.
+  test(
+    'a release mixing publish and unpublish actions is applied atomically',
+    { tag: ['@release'] },
+    async ({ page }) => {
+      // Confirm the release is genuinely mixed: grouped by action it shows both publish and unpublish.
+      await page.getByLabel('Group by').click();
+      await page.getByRole('option', { name: 'Actions' }).click();
+      await expect(page.getByRole('separator', { name: 'publish', exact: true })).toBeVisible();
+      await expect(page.getByRole('separator', { name: 'unpublish' })).toBeVisible();
+
+      // Apply the whole release in one action.
+      await clickAndWait(page, page.getByRole('button', { name: 'Publish', exact: true }));
+
+      // Atomic apply: the release is now done — its title still shows, there is no Publish button or
+      // pending actions left, and both sides of the mix report as processed.
+      await expect(page.getByRole('heading', { name: releaseName })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Publish', exact: true })).not.toBeVisible();
+      await expect(page.getByRole('gridcell', { name: 'publish unpublish' })).not.toBeVisible();
+      await expect(
+        page.getByRole('gridcell', { name: 'This entry was published.' }).first()
+      ).toBeVisible();
+      await expect(
+        page.getByRole('gridcell', { name: 'This entry was unpublished.' }).first()
+      ).toBeVisible();
+    }
+  );
+});
